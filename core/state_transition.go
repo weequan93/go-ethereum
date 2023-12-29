@@ -180,8 +180,11 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipAccountChecks: tx.SkipAccountChecks(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
-	if baseFee != nil && !arbutil.IsGaslessTx(tx) {
+	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
+	}
+	if arbutil.IsGaslessTx(tx) {
+		msg.GasPrice = common.Big0
 	}
 	var err error
 	msg.From, err = types.Sender(s, tx)
