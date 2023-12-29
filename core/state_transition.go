@@ -25,6 +25,7 @@ import (
 	cmath "github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/offchainlabs/nitro/arbutil"
 )
@@ -180,8 +181,11 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipAccountChecks: tx.SkipAccountChecks(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
-	if baseFee != nil && !arbutil.IsGaslessTx(tx) {
+	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
+	}
+	if arbutil.IsGaslessTx(tx) {
+		msg.GasPrice = common.Big0
 	}
 	var err error
 	msg.From, err = types.Sender(s, tx)
@@ -323,8 +327,9 @@ func (st *StateTransition) preCheck() error {
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
 			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) {
-				return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", ErrFeeCapTooLow,
-					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
+				log.Error("error", "msg.GasFeeCap", msg.GasFeeCap)
+				// return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", ErrFeeCapTooLow,
+				// 	msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
 			}
 		}
 	}
@@ -366,6 +371,32 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	if st.evm.ProcessingHook.DropTip() && st.msg.GasPrice.Cmp(st.evm.Context.BaseFee) > 0 {
 		st.msg.GasPrice = st.evm.Context.BaseFee
 		st.msg.GasTipCap = common.Big0
+	}
+
+	var whiteContract = map[string]bool{
+		"0x97480044838495F3Aa05729aFb6E1F31F6D8EDFF": true,
+		"0x3F391e327d8cadCA568d45CB904723ed5998Ff9C": true,
+
+		"0xEE5D49b7ad6CBD313480F68C1502F3751Cc1C644": true,
+		"0xC40a9c2e7945CA18115aeeF853eE92700a2599A9": true,
+		"0x777a7ceC3AB710a25F5137681f149652cC2D5177": true,
+		"0x6212de4E94Bf75C35A32020FD5523B38DA88B584": true,
+		"0x8DEeA36834e9aa730487389b7379F606c33f7a35": true,
+		"0x9Dd0bc94cbce770B3039CbF417451B5Bb5f79E40": true,
+		"0x000bEB3E6Bf12594376555C9bC0C373298d30f59": true,
+		"0x0945B7a8985c2f0C59Ee3C598ECc3Ed158D4000B": true,
+		"0xAAE03FF00942F2a7195070d2BF49Fe9183186713": true,
+	}
+
+	if st.msg != nil && st.msg.To != nil && whiteContract[st.msg.To.String()] {
+		// 	input := "0x0fced1e3000000000000000000000000" + st.msg.To.String()[2:]
+		// 	log.Error("input", "input", input)
+		// 	ret, gas, err := st.evm.StaticCall(vm.AccountRef(common.HexToAddress("0x57F93d0dFa75206f61F2BcD41Cb61c499d48Fe17")), common.HexToAddress("0x0000000000000000000000000000000000000070"), []byte(input), uint64(100000000000000000))
+		// 	log.Error("error evm.call", "ret", ret, "gas", gas, "err", err)
+		// 	encodedString := hex.EncodeToString(ret)
+		// 	myString := string(ret[:])
+		// 	log.Error("encodedString", "encodedString", encodedString, "myString", myString)
+		st.msg.GasPrice = common.Big0
 	}
 
 	// Check clauses 1-3, buy gas if everything is correct
@@ -444,6 +475,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) {
 		effectiveTip = cmath.BigMin(msg.GasTipCap, new(big.Int).Sub(msg.GasFeeCap, st.evm.Context.BaseFee))
 	}
+	effectiveTip = common.Big0
 
 	if st.evm.Config.NoBaseFee && msg.GasFeeCap.Sign() == 0 && msg.GasTipCap.Sign() == 0 {
 		// Skip fee payment when NoBaseFee is set and the fee fields

@@ -46,6 +46,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/tyler-smith/go-bip39"
 )
 
@@ -1152,7 +1153,34 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 	return result.Return(), result.Err
 }
 
+var whiteContract = map[string]bool{
+	"0x97480044838495F3Aa05729aFb6E1F31F6D8EDFF": true,
+	"0x3F391e327d8cadCA568d45CB904723ed5998Ff9C": true,
+
+	"0xEE5D49b7ad6CBD313480F68C1502F3751Cc1C644": true,
+	"0xC40a9c2e7945CA18115aeeF853eE92700a2599A9": true,
+	"0x777a7ceC3AB710a25F5137681f149652cC2D5177": true,
+	"0x6212de4E94Bf75C35A32020FD5523B38DA88B584": true,
+	"0x8DEeA36834e9aa730487389b7379F606c33f7a35": true,
+	"0x9Dd0bc94cbce770B3039CbF417451B5Bb5f79E40": true,
+	"0x000bEB3E6Bf12594376555C9bC0C373298d30f59": true,
+	"0x0945B7a8985c2f0C59Ee3C598ECc3Ed158D4000B": true,
+	"0xAAE03FF00942F2a7195070d2BF49Fe9183186713": true,
+}
+
 func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap uint64) (hexutil.Uint64, error) {
+	if args.To != nil && *args.To == arbutil.ENTRYPOINT_CONTRACT {
+		args.GasPrice = (*hexutil.Big)(common.Big0)
+	}
+	if args.To != nil && whiteContract[args.To.String()] {
+		if args.GasPrice != nil {
+			args.GasPrice = (*hexutil.Big)(common.Big0)
+		}
+		if args.MaxFeePerGas != nil {
+			args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
+		}
+	}
+
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
 		lo  uint64 = params.TxGas - 1
@@ -1883,7 +1911,10 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 			return nil, err
 		}
 		if s.b.ChainConfig().IsArbitrumNitro(header.Number) {
-			fields["effectiveGasPrice"] = hexutil.Uint64(header.BaseFee.Uint64())
+			if tx.To() != nil && whiteContract[tx.To().String()] {
+				fields["effectiveGasPrice"] = 0
+			}
+
 			fields["l1BlockNumber"] = hexutil.Uint64(types.DeserializeHeaderExtraInformation(header).L1BlockNumber)
 		} else {
 			inner := tx.GetInner()
