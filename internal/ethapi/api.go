@@ -1158,6 +1158,10 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		args.GasPrice = (*hexutil.Big)(common.Big0)
 	}
 
+	if args.To != nil && *args.To == arbutil.COUNTER_CONTRACT {
+		args.GasPrice = (*hexutil.Big)(common.Big0)
+	}
+
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
 		lo  uint64 = params.TxGas - 1
@@ -1888,7 +1892,9 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 			return nil, err
 		}
 		if s.b.ChainConfig().IsArbitrumNitro(header.Number) {
-			fields["effectiveGasPrice"] = hexutil.Uint64(header.BaseFee.Uint64())
+			if arbutil.IsCustomPriceTx(tx) {
+				fields["effectiveGasPrice"] = 0
+			}
 			fields["l1BlockNumber"] = hexutil.Uint64(types.DeserializeHeaderExtraInformation(header).L1BlockNumber)
 		} else {
 			inner := tx.GetInner()

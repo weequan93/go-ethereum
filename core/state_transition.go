@@ -325,7 +325,7 @@ func (st *StateTransition) preCheck() error {
 			}
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
-			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) {
+			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !arbutil.IsCustomPriceTx(msg.Tx) {
 				return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
 			}
@@ -368,6 +368,12 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	// Arbitrum: drop tip for delayed (and old) messages
 	if st.evm.ProcessingHook.DropTip() && st.msg.GasPrice.Cmp(st.evm.Context.BaseFee) > 0 {
 		st.msg.GasPrice = st.evm.Context.BaseFee
+		st.msg.GasTipCap = common.Big0
+	}
+
+	if arbutil.IsCustomPriceTx(st.msg.Tx) {
+		st.msg.GasPrice = common.Big0
+		st.msg.GasFeeCap = common.Big0
 		st.msg.GasTipCap = common.Big0
 	}
 
@@ -444,7 +450,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.refundGas(params.RefundQuotientEIP3529)
 	}
 	effectiveTip := msg.GasPrice
-	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) {
+	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !arbutil.IsCustomPriceTx(msg.Tx) {
 		effectiveTip = cmath.BigMin(msg.GasTipCap, new(big.Int).Sub(msg.GasFeeCap, st.evm.Context.BaseFee))
 	}
 
