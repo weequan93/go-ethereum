@@ -371,7 +371,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.msg.GasTipCap = common.Big0
 	}
 
-	if arbutil.IsCustomPriceTx(st.msg.Tx) {
+	if st.msg != nil && st.msg.To != nil && st.msg.To.String() == arbutil.COUNTER_CONTRACT.String() {
 		st.msg.GasPrice = common.Big0
 		st.msg.GasFeeCap = common.Big0
 		st.msg.GasTipCap = common.Big0

@@ -1159,7 +1159,12 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 	}
 
 	if args.To != nil && *args.To == arbutil.COUNTER_CONTRACT {
-		args.GasPrice = (*hexutil.Big)(common.Big0)
+		if args.GasPrice != nil {
+			args.GasPrice = (*hexutil.Big)(common.Big0)
+		}
+		if args.MaxFeePerGas != nil {
+			args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
+		}
 	}
 
 	// Binary search the gas requirement, as it may be higher than the amount used
