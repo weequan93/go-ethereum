@@ -1158,7 +1158,7 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		args.GasPrice = (*hexutil.Big)(common.Big0)
 	}
 
-	if args.To != nil && *args.To == arbutil.COUNTER_CONTRACT {
+	if args.To != nil && arbutil.IsCustomPriceAddr(args.To) {
 		if args.GasPrice != nil {
 			args.GasPrice = (*hexutil.Big)(common.Big0)
 		}
