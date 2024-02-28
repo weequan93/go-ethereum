@@ -47,6 +47,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/offchainlabs/nitro/arbos/arbosState"
 	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/tyler-smith/go-bip39"
 )
@@ -1293,7 +1294,25 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		args.GasPrice = (*hexutil.Big)(common.Big0)
 	}
 
-	if args.To != nil && arbutil.IsCustomPriceAddr(args.To) {
+	state, _, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if state == nil || err != nil {
+		return 0, err
+	}
+
+	arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
+	if err != nil {
+		log.Error("failed to open ArbOS state", "err", err)
+		return 0, err
+	}
+	pricer := arbState.Pricer()
+
+	isMember := arbutil.IsCustomPriceTxCheckAddr(pricer, args.To)
+	if err != nil {
+		log.Error("failed to get TxToAddr", "err", err)
+		return 0, err
+	}
+
+	if args.To != nil && isMember {
 		if args.GasPrice != nil {
 			args.GasPrice = (*hexutil.Big)(common.Big0)
 		}
@@ -2090,7 +2109,26 @@ func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash commo
 			fields["effectiveGasPrice"] = hexutil.Uint64(header.BaseFee.Uint64())
 			fields["l1BlockNumber"] = hexutil.Uint64(types.DeserializeHeaderExtraInformation(header).L1BlockNumber)
 
-			if arbutil.IsCustomPriceTx(tx) {
+			bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
+
+			state, _, err := backend.StateAndHeaderByNumberOrHash(ctx, bNrOrHash)
+			if state == nil || err != nil {
+				return nil, err
+			}
+
+			arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
+			if err != nil {
+				log.Error("failed to open ArbOS state", "err", err)
+				return nil, err
+			}
+			pricer := arbState.Pricer()
+			isMember := arbutil.IsCustomPriceTxCheck(pricer, tx)
+			if err != nil {
+				log.Error("failed to get TxToAddr", "err", err)
+				return nil, err
+			}
+
+			if isMember {
 				fields["effectiveGasPrice"] = 0
 			}
 		} else {

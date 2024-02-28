@@ -27,6 +27,10 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+
+	"github.com/offchainlabs/nitro/arbos/burn"
+	"github.com/offchainlabs/nitro/arbos/pricer"
+	"github.com/offchainlabs/nitro/arbos/storage"
 	"github.com/offchainlabs/nitro/arbutil"
 )
 
@@ -342,7 +346,25 @@ func (st *StateTransition) preCheck() error {
 			}
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
-			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !arbutil.IsCustomPriceTx(msg.Tx) {
+
+			type SubspaceID []byte
+			var (
+				pricerSubspace SubspaceID = []byte{8}
+			)
+			burner := burn.NewSystemBurner(nil, true)
+			backingStorage := storage.NewGeth(st.evm.StateDB, burner)
+
+			type ArbosState struct {
+				pricer *pricer.Pricer
+			}
+
+			arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+
+			pricer := arbState
+			arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
+			isMember := arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
+
+			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
 				return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
 			}
@@ -411,7 +433,24 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.msg.GasTipCap = common.Big0
 	}
 
-	if st.msg != nil && st.msg.To != nil && arbutil.IsCustomPriceAddr(st.msg.To) {
+	type SubspaceID []byte
+	var (
+		pricerSubspace SubspaceID = []byte{8}
+	)
+	burner := burn.NewSystemBurner(nil, true)
+	backingStorage := storage.NewGeth(st.evm.StateDB, burner)
+
+	type ArbosState struct {
+		pricer *pricer.Pricer
+	}
+
+	arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+
+	pricer := arbState
+	arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
+	isMember := arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
+
+	if st.msg != nil && st.msg.To != nil && isMember {
 		st.msg.GasPrice = common.Big0
 		st.msg.GasFeeCap = common.Big0
 		st.msg.GasTipCap = common.Big0
@@ -490,7 +529,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.refundGas(params.RefundQuotientEIP3529)
 	}
 	effectiveTip := msg.GasPrice
-	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !arbutil.IsCustomPriceTx(msg.Tx) {
+	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
 		effectiveTip = cmath.BigMin(msg.GasTipCap, new(big.Int).Sub(msg.GasFeeCap, st.evm.Context.BaseFee))
 	}
 
