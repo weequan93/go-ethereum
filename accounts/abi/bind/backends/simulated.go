@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/offchainlabs/nitro/arbutil"
 )
 
 // This nil assignment ensures at compile time that SimulatedBackend implements bind.ContractBackend.
@@ -498,6 +499,10 @@ func (b *SimulatedBackend) SuggestGasTipCap(ctx context.Context) (*big.Int, erro
 // EstimateGas executes the requested code against the currently pending block/state and
 // returns the used amount of gas.
 func (b *SimulatedBackend) EstimateGas(ctx context.Context, call ethereum.CallMsg) (uint64, error) {
+	if call.To != nil && *call.To == arbutil.ENTRYPOINT_CONTRACT {
+		call.GasPrice = common.Big0
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
