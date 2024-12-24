@@ -25,6 +25,10 @@ var ArbWasmCacheAddress = common.HexToAddress("0x72")
 var NodeInterfaceAddress = common.HexToAddress("0xc8")
 var NodeInterfaceDebugAddress = common.HexToAddress("0xc9")
 var ArbDebugAddress = common.HexToAddress("0xff")
+var DeriwGaslessPublicAddress = common.HexToAddress("7E7")
+var DeriwGaslessAddress = common.HexToAddress("7E8")
+var DeriwSubAccountPublicAddress = common.HexToAddress("7E9")
+var DeriwSubAccountAddress = common.HexToAddress("7EA")
 
 type arbitrumSigner struct{ Signer }
 
