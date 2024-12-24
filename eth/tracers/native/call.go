@@ -271,7 +271,7 @@ func (t *callTracer) CaptureTxEnd(restGas uint64) {
 
 // GetResult returns the json-encoded nested list of call traces, and any
 // error arising from the encoding or forceful termination (via `Stop`).
-func (t *callTracer) GetResult() (json.RawMessage, error) {
+func (t *callTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	if len(t.callstack) != 1 {
 		return nil, errors.New("incorrect number of top-level calls")
 	}
@@ -280,6 +280,7 @@ func (t *callTracer) GetResult() (json.RawMessage, error) {
 	call := t.callstack[0]
 	call.BeforeEVMTransfers = &t.beforeEVMTransfers
 	call.AfterEVMTransfers = &t.afterEVMTransfers
+	call.From.SetBytes(from.Bytes())
 
 	res, err := json.Marshal(call)
 	if err != nil {

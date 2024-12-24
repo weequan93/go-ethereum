@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/arbitrum-core"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -81,7 +82,7 @@ func testTransactionMarshal(t *testing.T, tests []txData, config *params.ChainCo
 		}
 
 		// rpcTransaction
-		rpcTx := newRPCTransaction(tx, common.Hash{}, 0, 0, 0, nil, config)
+		rpcTx := newRPCTransaction(tx, common.Hash{}, 0, 0, 0, nil, config, nil)
 		if data, err := json.Marshal(rpcTx); err != nil {
 			t.Fatalf("test %d: marshalling failed; %v", i, err)
 		} else if err = tx2.UnmarshalJSON(data); err != nil {
@@ -492,6 +493,27 @@ func (b testBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber)
 func (b testBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
 	return b.chain.GetHeaderByHash(hash), nil
 }
+func (b testBackend) ArbStateByBlockNumber(ctx context.Context, number rpc.BlockNumber) (*arbitrum_core.ArbState, error) {
+
+	var state *state.StateDB
+
+	header, err := b.HeaderByNumber(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, errors.New("header not found")
+	}
+
+	stateDb, err := b.chain.StateAt(header.Root)
+	if err != nil {
+		return nil, err
+	}
+	state = stateDb
+
+	return arbitrum_core.New(state), nil
+}
+
 func (b testBackend) HeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*types.Header, error) {
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		return b.HeaderByNumber(ctx, blockNr)
@@ -1523,7 +1545,7 @@ func TestRPCMarshalBlock(t *testing.T) {
 	}
 
 	for i, tc := range testSuite {
-		resp := RPCMarshalBlock(block, tc.inclTx, tc.fullTx, params.MainnetChainConfig)
+		resp := RPCMarshalBlock(block, tc.inclTx, tc.fullTx, params.MainnetChainConfig, nil)
 		out, err := json.Marshal(resp)
 		if err != nil {
 			t.Errorf("test %d: json marshal error: %v", i, err)
@@ -1574,6 +1596,7 @@ func TestRPCGetBlockOrHeader(t *testing.T) {
 		tx, _ := types.SignTx(types.NewTx(&types.LegacyTx{Nonce: uint64(i), To: &acc2Addr, Value: big.NewInt(1000), Gas: params.TxGas, GasPrice: b.BaseFee(), Data: nil}), signer, acc1Key)
 		b.AddTx(tx)
 	})
+
 	backend.setPendingBlock(pending)
 	api := NewBlockChainAPI(backend)
 	blockHashes := make([]common.Hash, genBlocks+1)
@@ -1762,6 +1785,7 @@ func TestRPCGetBlockOrHeader(t *testing.T) {
 		} else {
 			if tt.reqHeader {
 				result, err = api.GetHeaderByNumber(context.Background(), tt.blockNumber)
+
 				rpc = "eth_getHeaderByNumber"
 			} else {
 				result, err = api.GetBlockByNumber(context.Background(), tt.blockNumber, tt.fullTx)

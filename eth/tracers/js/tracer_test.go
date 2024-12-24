@@ -83,7 +83,7 @@ func runTrace(tracer tracers.Tracer, vmctx *vmContext, chaincfg *params.ChainCon
 	if err != nil {
 		return nil, err
 	}
-	return tracer.GetResult()
+	return tracer.GetResult(nil)
 }
 
 func TestTracer(t *testing.T) {
@@ -191,7 +191,7 @@ func TestHaltBetweenSteps(t *testing.T) {
 	tracer.Stop(timeout)
 	tracer.CaptureState(0, 0, 0, 0, scope, nil, 0, nil)
 
-	if _, err := tracer.GetResult(); !strings.Contains(err.Error(), timeout.Error()) {
+	if _, err := tracer.GetResult(nil); !strings.Contains(err.Error(), timeout.Error()) {
 		t.Errorf("Expected timeout error, got %v", err)
 	}
 }
@@ -208,7 +208,7 @@ func TestNoStepExec(t *testing.T) {
 		env := vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(100)}, &dummyStatedb{}, params.TestChainConfig, vm.Config{Tracer: tracer})
 		tracer.CaptureStart(env, common.Address{}, common.Address{}, false, []byte{}, 1000, big.NewInt(0))
 		tracer.CaptureEnd(nil, 0, nil)
-		ret, err := tracer.GetResult()
+		ret, err := tracer.GetResult(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -279,7 +279,7 @@ func TestEnterExit(t *testing.T) {
 	tracer.CaptureEnter(vm.CALL, scope.Contract.Caller(), scope.Contract.Address(), []byte{}, 1000, new(big.Int))
 	tracer.CaptureExit([]byte{}, 400, nil)
 
-	have, err := tracer.GetResult()
+	have, err := tracer.GetResult(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	have, err := tracer.GetResult()
+	have, err := tracer.GetResult(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

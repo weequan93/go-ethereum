@@ -138,10 +138,10 @@ func (t *muxTracer) CaptureStylusHostio(name string, args, outs []byte, startInk
 }
 
 // GetResult returns an empty json object.
-func (t *muxTracer) GetResult() (json.RawMessage, error) {
+func (t *muxTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	resObject := make(map[string]json.RawMessage)
 	for i, tt := range t.tracers {
-		r, err := tt.GetResult()
+		r, err := tt.GetResult(from)
 		if err != nil {
 			return nil, err
 		}

@@ -19,6 +19,7 @@ package eth
 import (
 	"context"
 	"errors"
+	"github.com/ethereum/go-ethereum/arbitrum-core"
 	"math/big"
 	"time"
 
@@ -208,6 +209,32 @@ func (b *EthAPIBackend) StateAndHeaderByNumber(ctx context.Context, number rpc.B
 		return nil, nil, err
 	}
 	return stateDb, header, nil
+}
+
+func (b *EthAPIBackend) ArbStateByBlockNumber(ctx context.Context, number rpc.BlockNumber) (*arbitrum_core.ArbState, error) {
+	var state *state.StateDB
+	// Pending state is only known by the miner
+	if number == rpc.PendingBlockNumber {
+		_, state = b.eth.miner.Pending()
+		if state == nil {
+			return nil, errors.New("pending state is not available")
+		}
+	}
+	// Otherwise resolve the block number and return its state
+	header, err := b.HeaderByNumber(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, errors.New("header not found")
+	}
+	stateDb, err := b.eth.BlockChain().StateAt(header.Root)
+	if err != nil {
+		return nil, err
+	}
+	state = stateDb
+
+	return arbitrum_core.New(state), nil
 }
 
 func (b *EthAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*state.StateDB, *types.Header, error) {

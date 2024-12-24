@@ -840,7 +840,7 @@ func TestRuntimeJSTracer(t *testing.T) {
 			if err != nil {
 				t.Fatal("didn't expect error", err)
 			}
-			res, err := tracer.GetResult()
+			res, err := tracer.GetResult(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -875,7 +875,7 @@ func TestJSTracerCreateTx(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := tracer.GetResult()
+	res, err := tracer.GetResult(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

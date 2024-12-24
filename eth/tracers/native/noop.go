@@ -68,7 +68,7 @@ func (*noopTracer) CaptureTxStart(gasLimit uint64) {}
 func (*noopTracer) CaptureTxEnd(restGas uint64) {}
 
 // GetResult returns an empty json object.
-func (t *noopTracer) GetResult() (json.RawMessage, error) {
+func (t *noopTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	return json.RawMessage(`{}`), nil
 }
 

@@ -19,6 +19,7 @@ package ethapi
 import (
 	"context"
 	"errors"
+	"github.com/ethereum/go-ethereum/arbitrum-core"
 	"math/big"
 	"reflect"
 	"testing"
@@ -358,6 +359,16 @@ func (b *backendMock) StateAndHeaderByNumber(ctx context.Context, number rpc.Blo
 func (b *backendMock) StateAndHeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*state.StateDB, *types.Header, error) {
 	return nil, nil, nil
 }
+func (b backendMock) ArbStateByBlockNumber(ctx context.Context, number rpc.BlockNumber) (*arbitrum_core.ArbState, error) {
+
+	state, err := b.ArbStateByBlockNumber(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+
+	return state, nil
+}
+
 func (b *backendMock) PendingBlockAndReceipts() (*types.Block, types.Receipts) { return nil, nil }
 func (b *backendMock) GetReceipts(ctx context.Context, hash common.Hash) (types.Receipts, error) {
 	return nil, nil

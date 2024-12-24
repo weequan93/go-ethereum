@@ -162,7 +162,7 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 				t.Fatalf("failed to execute transaction: %v", err)
 			}
 			// Retrieve the trace result and compare against the expected.
-			res, err := tracer.GetResult()
+			res, err := tracer.GetResult(&msg.From)
 			if err != nil {
 				t.Fatalf("failed to retrieve trace result: %v", err)
 			}
@@ -262,7 +262,7 @@ func benchTracer(tracerName string, test *callTracerTest, b *testing.B) {
 		if _, err = st.TransitionDb(); err != nil {
 			b.Fatalf("failed to execute transaction: %v", err)
 		}
-		if _, err = tracer.GetResult(); err != nil {
+		if _, err = tracer.GetResult(nil); err != nil {
 			b.Fatal(err)
 		}
 		state.StateDB.RevertToSnapshot(snap)
@@ -400,7 +400,7 @@ func TestInternals(t *testing.T) {
 				t.Fatalf("test %v: failed to execute transaction: %v", tc.name, err)
 			}
 			// Retrieve the trace result and compare against the expected
-			res, err := tc.tracer.GetResult()
+			res, err := tc.tracer.GetResult(&msg.From)
 			if err != nil {
 				t.Fatalf("test %v: failed to retrieve trace result: %v", tc.name, err)
 			}
