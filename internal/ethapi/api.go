@@ -49,6 +49,8 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
+	"github.com/offchainlabs/nitro/arbos/arbosState"
+	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/tyler-smith/go-bip39"
 )
 
@@ -1256,7 +1258,73 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 // there are unexpected failures. The gas limit is capped by both `args.Gas` (if non-nil &
 // non-zero) and `gasCap` (if non-zero).
 func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, gasCap uint64) (hexutil.Uint64, error) {
-	// Retrieve the base state and mutate it with any overrides
+	// Binary search the gas limit, as it may need to be higher than the amount used
+
+	if args.To != nil && *args.To == arbutil.ENTRYPOINT_CONTRACT {
+		args.GasPrice = (*hexutil.Big)(common.Big0)
+	}
+
+	state, _, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if state == nil || err != nil {
+		return 0, err
+	}
+
+	arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
+	if err != nil {
+		log.Error("failed to open ArbOS state", "err", err)
+		return 0, err
+	}
+	pricer := arbState.Pricer()
+
+	isMember := arbutil.IsCustomPriceTxCheckAddr(pricer, args.To)
+	if err != nil {
+		log.Error("failed to get TxToAddr", "err", err)
+		return 0, err
+	}
+
+	if args.To != nil && isMember {
+		if args.GasPrice != nil {
+			args.GasPrice = (*hexutil.Big)(common.Big0)
+		}
+		if args.MaxFeePerGas != nil {
+			args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
+		}
+	}
+
+	// var (
+	// 	lo uint64 // lowest-known gas limit where tx execution fails
+	// 	hi uint64 // lowest-known gas limit where tx execution succeeds
+	// )
+	// Use zero address if sender unspecified.
+	if args.From == nil {
+		args.From = new(common.Address)
+	}
+	// Determine the highest gas limit can be used during the estimation.
+	// if args.Gas != nil && uint64(*args.Gas) >= params.TxGas {
+	// 	hi = uint64(*args.Gas)
+	// } else {
+	// 	// Retrieve the block to act as the gas ceiling
+	// 	block, err := b.BlockByNumberOrHash(ctx, blockNrOrHash)
+	// 	if err != nil {
+	// 		return 0, err
+	// 	}
+	// 	if block == nil {
+	// 		return 0, errors.New("block not found")
+	// 	}
+	// 	hi = block.GasLimit()
+	// }
+	// Normalize the max fee per gas the call is willing to spend.
+	// var feeCap *big.Int
+	// if args.GasPrice != nil && (args.MaxFeePerGas != nil || args.MaxPriorityFeePerGas != nil) {
+	// 	return 0, errors.New("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified")
+	// } else if args.GasPrice != nil {
+	// 	feeCap = args.GasPrice.ToInt()
+	// } else if args.MaxFeePerGas != nil {
+	// 	feeCap = args.MaxFeePerGas.ToInt()
+	// } else {
+	// 	feeCap = common.Big0
+	// }
+
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return 0, err
@@ -1953,6 +2021,29 @@ func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash commo
 		if backend.ChainConfig().IsArbitrumNitro(header.Number) {
 			fields["effectiveGasPrice"] = hexutil.Uint64(header.BaseFee.Uint64())
 			fields["l1BlockNumber"] = hexutil.Uint64(types.DeserializeHeaderExtraInformation(header).L1BlockNumber)
+
+			bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
+
+			state, _, err := backend.StateAndHeaderByNumberOrHash(ctx, bNrOrHash)
+			if state == nil || err != nil {
+				return nil, err
+			}
+
+			arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
+			if err != nil {
+				log.Error("failed to open ArbOS state", "err", err)
+				return nil, err
+			}
+			pricer := arbState.Pricer()
+			isMember := arbutil.IsCustomPriceTxCheck(pricer, tx)
+			if err != nil {
+				log.Error("failed to get TxToAddr", "err", err)
+				return nil, err
+			}
+
+			if isMember {
+				fields["effectiveGasPrice"] = 0
+			}
 		} else {
 			inner := tx.GetInner()
 			arbTx, ok := inner.(*types.ArbitrumLegacyTxData)

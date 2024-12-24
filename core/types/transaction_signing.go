@@ -173,7 +173,6 @@ func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 type Signer interface {
 	// Sender returns the sender address of the transaction.
 	Sender(tx *Transaction) (common.Address, error)
-
 	// SignatureValues returns the raw R, S, V values corresponding to the
 	// given signature.
 	SignatureValues(tx *Transaction, sig []byte) (r, s, v *big.Int, err error)
@@ -579,6 +578,12 @@ func recoverPlain(sighash common.Hash, R, S, Vb *big.Int, homestead bool) (commo
 	}
 	var addr common.Address
 	copy(addr[:], crypto.Keccak256(pub[1:])[12:])
+
+	// Deriw chain requirement,
+	// Find mapping first for sub-account
+
+	// Has sub-account restrict transaction method
+
 	return addr, nil
 }
 
