@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
 	"os"
 	"runtime"
 	"sync"
@@ -980,7 +981,8 @@ func (api *API) traceTx(ctx context.Context, message *core.Message, txctx *Conte
 	if _, err = core.ApplyMessage(vmenv, message, new(core.GasPool).AddGas(message.GasLimit)); err != nil {
 		return nil, fmt.Errorf("tracing failed: %w", err)
 	}
-	return tracer.GetResult()
+	return tracer.GetResult(&message.From)
+
 }
 
 // APIs return the collection of RPC services the tracer package offers.

@@ -40,7 +40,7 @@ type Context struct {
 // allows collecting the tracing result.
 type Tracer interface {
 	vm.EVMLogger
-	GetResult() (json.RawMessage, error)
+	GetResult(*common.Address) (json.RawMessage, error)
 	// Stop terminates execution of the tracer at the first opportune moment.
 	Stop(err error)
 }

@@ -248,7 +248,7 @@ func (t *prestateTracer) CaptureTxEnd(restGas uint64) {
 
 // GetResult returns the json-encoded nested list of call traces, and any
 // error arising from the encoding or forceful termination (via `Stop`).
-func (t *prestateTracer) GetResult() (json.RawMessage, error) {
+func (t *prestateTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	var res []byte
 	var err error
 	if t.config.DiffMode {

@@ -374,7 +374,7 @@ func (t *jsTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
 }
 
 // GetResult calls the Javascript 'result' function and returns its value, or any accumulated error
-func (t *jsTracer) GetResult() (json.RawMessage, error) {
+func (t *jsTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	ctx := t.vm.ToValue(t.ctx)
 	res, err := t.result(t.obj, ctx, t.dbValue)
 	if err != nil {

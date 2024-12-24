@@ -49,8 +49,6 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
-	"github.com/offchainlabs/nitro/arbos/arbosState"
-	"github.com/offchainlabs/nitro/arbutil"
 	"github.com/tyler-smith/go-bip39"
 )
 
@@ -813,9 +811,15 @@ func (s *BlockChainAPI) GetHeaderByHash(ctx context.Context, hash common.Hash) m
 //   - When fullTx is true all transactions in the block are returned, otherwise
 //     only the transaction hash is returned.
 func (s *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
+
+	arbState, err := s.b.ArbStateByBlockNumber(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+
 	block, err := s.b.BlockByNumber(ctx, number)
 	if block != nil && err == nil {
-		response, err := s.rpcMarshalBlock(ctx, block, true, fullTx)
+		response, err := s.rpcMarshalBlock(ctx, block, true, fullTx, arbState)
 		if err == nil && number == rpc.PendingBlockNumber {
 			// Pending blocks need to nil out a few fields
 			for _, field := range []string{"hash", "nonce", "miner"} {
@@ -832,13 +836,14 @@ func (s *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNu
 func (s *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
 	block, err := s.b.BlockByHash(ctx, hash)
 	if block != nil {
-		return s.rpcMarshalBlock(ctx, block, true, fullTx)
+		return s.rpcMarshalBlock(ctx, block, true, fullTx, nil)
 	}
 	return nil, err
 }
 
 // GetUncleByBlockNumberAndIndex returns the uncle block for the given block hash and index.
 func (s *BlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) (map[string]interface{}, error) {
+	log.Info("blockByNumber", "BlockChainAPI", "BlockChainAPI")
 	block, err := s.b.BlockByNumber(ctx, blockNr)
 	if block != nil {
 		uncles := block.Uncles()
@@ -847,7 +852,7 @@ func (s *BlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context, block
 			return nil, nil
 		}
 		block = types.NewBlockWithHeader(uncles[index])
-		return s.rpcMarshalBlock(ctx, block, false, false)
+		return s.rpcMarshalBlock(ctx, block, false, false, nil)
 	}
 	return nil, err
 }
@@ -862,13 +867,14 @@ func (s *BlockChainAPI) GetUncleByBlockHashAndIndex(ctx context.Context, blockHa
 			return nil, nil
 		}
 		block = types.NewBlockWithHeader(uncles[index])
-		return s.rpcMarshalBlock(ctx, block, false, false)
+		return s.rpcMarshalBlock(ctx, block, false, false, nil)
 	}
 	return nil, err
 }
 
 // GetUncleCountByBlockNumber returns number of uncles in the block for the given block number
 func (s *BlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, blockNr rpc.BlockNumber) *hexutil.Uint {
+	log.Info("BlockByNumber", "BlockChainAPI", "BlockChainAPI")
 	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
 		n := hexutil.Uint(len(block.Uncles()))
 		return &n
@@ -1260,27 +1266,24 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, gasCap uint64) (hexutil.Uint64, error) {
 	// Binary search the gas limit, as it may need to be higher than the amount used
 
-	if args.To != nil && *args.To == arbutil.ENTRYPOINT_CONTRACT {
-		args.GasPrice = (*hexutil.Big)(common.Big0)
-	}
+	//if args.To != nil && *args.To == arbutil.ENTRYPOINT_CONTRACT {
+	//	args.GasPrice = (*hexutil.Big)(common.Big0)
+	//}
 
 	state, _, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return 0, err
 	}
 
-	arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
-	if err != nil {
-		log.Error("failed to open ArbOS state", "err", err)
-		return 0, err
-	}
-	pricer := arbState.Pricer()
+	arbState := core.New(state)
 
-	isMember := arbutil.IsCustomPriceTxCheckAddr(pricer, args.To)
-	if err != nil {
-		log.Error("failed to get TxToAddr", "err", err)
-		return 0, err
-	}
+	isMember := arbState.PricerState.IsCustomPriceTxCheckAddr(args.To)
+
+	//isMember := arbutil.IsCustomPriceTxCheckAddr(pricer, args.To)
+	//if err != nil {
+	//	log.Error("failed to get TxToAddr", "err", err)
+	//	return 0, err
+	//}
 
 	if args.To != nil && isMember {
 		if args.GasPrice != nil {
@@ -1433,7 +1436,7 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 // RPCMarshalBlock converts the given block to the RPC output which depends on fullTx. If inclTx is true transactions are
 // returned. When fullTx is true the returned block contains full transaction details, otherwise it will only contain
 // transaction hashes.
-func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *params.ChainConfig) map[string]interface{} {
+func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *params.ChainConfig, arbState *core.ArbState) map[string]interface{} {
 	fields := RPCMarshalHeader(block.Header())
 	fields["size"] = hexutil.Uint64(block.Size())
 
@@ -1443,7 +1446,7 @@ func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *param
 		}
 		if fullTx {
 			formatTx = func(idx int, tx *types.Transaction) interface{} {
-				return newRPCTransactionFromBlockIndex(block, uint64(idx), config)
+				return newRPCTransactionFromBlockIndex(block, uint64(idx), config, arbState)
 			}
 		}
 		txs := block.Transactions()
@@ -1520,9 +1523,9 @@ func (s *BlockChainAPI) arbClassicL1BlockNumber(ctx context.Context, block *type
 
 // rpcMarshalBlock uses the generalized output filler, then adds the total difficulty field, which requires
 // a `BlockchainAPI`.
-func (s *BlockChainAPI) rpcMarshalBlock(ctx context.Context, b *types.Block, inclTx bool, fullTx bool) (map[string]interface{}, error) {
+func (s *BlockChainAPI) rpcMarshalBlock(ctx context.Context, b *types.Block, inclTx bool, fullTx bool, arbState *core.ArbState) (map[string]interface{}, error) {
 	chainConfig := s.b.ChainConfig()
-	fields := RPCMarshalBlock(b, inclTx, fullTx, chainConfig)
+	fields := RPCMarshalBlock(b, inclTx, fullTx, chainConfig, arbState)
 	if inclTx {
 		fields["totalDifficulty"] = (*hexutil.Big)(s.b.GetTd(ctx, b.Hash()))
 	}
@@ -1580,9 +1583,17 @@ type RPCTransaction struct {
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
 // representation, with the given location metadata set (if available).
-func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, blockTime uint64, index uint64, baseFee *big.Int, config *params.ChainConfig) *RPCTransaction {
+func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, blockTime uint64, index uint64, baseFee *big.Int, config *params.ChainConfig, arbState *core.ArbState) *RPCTransaction {
 	signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
 	from, _ := types.Sender(signer, tx)
+
+	if arbState != nil {
+		parentAccount, _ := arbState.SubAccountState.GetParentAddress(from, *tx.To(), tx.Data())
+		if parentAccount != nil {
+			from.SetBytes(parentAccount.Bytes())
+		}
+	}
+
 	v, r, s := tx.RawSignatureValues()
 	result := &RPCTransaction{
 		Type:     hexutil.Uint64(tx.Type()),
@@ -1712,16 +1723,16 @@ func NewRPCPendingTransaction(tx *types.Transaction, current *types.Header, conf
 		blockNumber = current.Number.Uint64()
 		blockTime = current.Time
 	}
-	return newRPCTransaction(tx, common.Hash{}, blockNumber, blockTime, 0, baseFee, config)
+	return newRPCTransaction(tx, common.Hash{}, blockNumber, blockTime, 0, baseFee, config, nil)
 }
 
 // newRPCTransactionFromBlockIndex returns a transaction that will serialize to the RPC representation.
-func newRPCTransactionFromBlockIndex(b *types.Block, index uint64, config *params.ChainConfig) *RPCTransaction {
+func newRPCTransactionFromBlockIndex(b *types.Block, index uint64, config *params.ChainConfig, arbState *core.ArbState) *RPCTransaction {
 	txs := b.Transactions()
 	if index >= uint64(len(txs)) {
 		return nil
 	}
-	return newRPCTransaction(txs[index], b.Hash(), b.NumberU64(), b.Time(), index, b.BaseFee(), config)
+	return newRPCTransaction(txs[index], b.Hash(), b.NumberU64(), b.Time(), index, b.BaseFee(), config, arbState)
 }
 
 // newRPCRawTransactionFromBlockIndex returns the bytes of a transaction given a block and a transaction index.
@@ -1855,7 +1866,7 @@ func (s *TransactionAPI) GetBlockTransactionCountByHash(ctx context.Context, blo
 // GetTransactionByBlockNumberAndIndex returns the transaction for the given block number and index.
 func (s *TransactionAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) *RPCTransaction {
 	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
-		return newRPCTransactionFromBlockIndex(block, uint64(index), s.b.ChainConfig())
+		return newRPCTransactionFromBlockIndex(block, uint64(index), s.b.ChainConfig(), nil)
 	}
 	return nil
 }
@@ -1863,7 +1874,7 @@ func (s *TransactionAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
 func (s *TransactionAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index hexutil.Uint) *RPCTransaction {
 	if block, _ := s.b.BlockByHash(ctx, blockHash); block != nil {
-		return newRPCTransactionFromBlockIndex(block, uint64(index), s.b.ChainConfig())
+		return newRPCTransactionFromBlockIndex(block, uint64(index), s.b.ChainConfig(), nil)
 	}
 	return nil
 }
@@ -1910,6 +1921,7 @@ func (s *TransactionAPI) GetTransactionCount(ctx context.Context, address common
 
 // GetTransactionByHash returns the transaction for the given hash
 func (s *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.Hash) (*RPCTransaction, error) {
+
 	// Try to return an already finalized transaction
 	found, tx, blockHash, blockNumber, index, err := s.b.GetTransaction(ctx, hash)
 	if !found {
@@ -1926,7 +1938,21 @@ func (s *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.H
 	if err != nil {
 		return nil, err
 	}
-	return newRPCTransaction(tx, blockHash, blockNumber, header.Time, index, header.BaseFee, s.b.ChainConfig()), nil
+	rpcTx := newRPCTransaction(tx, blockHash, blockNumber, header.Time, index, header.BaseFee, s.b.ChainConfig(), nil)
+
+	arbState, err := s.b.ArbStateByBlockNumber(ctx, rpc.PendingBlockNumber)
+	if err != nil {
+		return nil, nil
+	}
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(rpcTx.From, *rpcTx.To, rpcTx.Input)
+	if err != nil {
+		return nil, err
+	}
+	if parentAccount != nil {
+		rpcTx.From.SetBytes(parentAccount.Bytes())
+	}
+
+	return rpcTx, nil
 }
 
 // GetRawTransactionByHash returns the bytes of the transaction for the given hash.
@@ -1975,6 +2001,18 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 // marshalReceipt marshals a transaction receipt into a JSON object.
 func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int, backend Backend) (map[string]interface{}, error) {
 	from, _ := types.Sender(signer, tx)
+	arbState, err := backend.ArbStateByBlockNumber(ctx, rpc.PendingBlockNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(from, *tx.To(), tx.Data())
+	if err != nil {
+		return nil, err
+	}
+	if parentAccount != nil {
+		from.SetBytes(parentAccount.Bytes())
+	}
 
 	fields := map[string]interface{}{
 		"blockHash":         blockHash,
@@ -2022,24 +2060,29 @@ func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash commo
 			fields["effectiveGasPrice"] = hexutil.Uint64(header.BaseFee.Uint64())
 			fields["l1BlockNumber"] = hexutil.Uint64(types.DeserializeHeaderExtraInformation(header).L1BlockNumber)
 
-			bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
-
-			state, _, err := backend.StateAndHeaderByNumberOrHash(ctx, bNrOrHash)
-			if state == nil || err != nil {
-				return nil, err
-			}
-
-			arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
-			if err != nil {
-				log.Error("failed to open ArbOS state", "err", err)
-				return nil, err
-			}
-			pricer := arbState.Pricer()
-			isMember := arbutil.IsCustomPriceTxCheck(pricer, tx)
-			if err != nil {
-				log.Error("failed to get TxToAddr", "err", err)
-				return nil, err
-			}
+			isMember := arbState.PricerState.IsCustomPriceTxCheck(tx)
+			//if parentAccount != nil {
+			//	from.SetBytes(parentAccount.Bytes())
+			//}
+			//
+			//bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
+			//
+			//state, _, err := backend.StateAndHeaderByNumberOrHash(ctx, bNrOrHash)
+			//if state == nil || err != nil {
+			//	return nil, err
+			//}
+			//
+			//arbState, err := arbosState.OpenSystemArbosState(state, nil, true)
+			//if err != nil {
+			//	log.Error("failed to open ArbOS state", "err", err)
+			//	return nil, err
+			//}
+			//pricer := arbState.Pricer()
+			//isMember := arbutil.IsCustomPriceTxCheck(pricer, tx)
+			//if err != nil {
+			//	log.Error("failed to get TxToAddr", "err", err)
+			//	return nil, err
+			//}
 
 			if isMember {
 				fields["effectiveGasPrice"] = 0

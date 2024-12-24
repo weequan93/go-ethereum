@@ -28,11 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
-
-	"github.com/offchainlabs/nitro/arbos/burn"
-	"github.com/offchainlabs/nitro/arbos/pricer"
-	"github.com/offchainlabs/nitro/arbos/storage"
-	"github.com/offchainlabs/nitro/arbutil"
 )
 
 // ExecutionResult includes all output after executing given evm
@@ -202,11 +197,13 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
 	}
-	if arbutil.IsGaslessTx(tx) {
-		msg.GasPrice = common.Big0
-	}
+
+	//if arbutil.IsGaslessTx(tx) {
+	//	msg.GasPrice = common.Big0
+	//}
 	var err error
 	msg.From, err = types.Sender(s, tx)
+
 	return msg, err
 }
 
@@ -363,24 +360,23 @@ func (st *StateTransition) preCheck() error {
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
 
-			type SubspaceID []byte
-			var (
-				pricerSubspace SubspaceID = []byte{8}
-			)
-			burner := burn.NewSystemBurner(nil, true)
-			backingStorage := storage.NewGeth(st.evm.StateDB, burner)
+			arbState := NewVmState(&st.evm.StateDB)
+			isMember := arbState.PricerState.IsCustomPriceTxCheck(msg.Tx)
+			//type SubspaceID []byte
+			//var (
+			//	pricerSubspace SubspaceID = []byte{8}
+			//)
+			//burner := burn.NewSystemBurner(nil, true)
+			//backingStorage := storage.NewGeth(st.evm.StateDB, burner)
+			//
+			//arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+			//
+			//pricer := arbState
+			//arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
+			//isMember := arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
 
-			type ArbosState struct {
-				pricer *pricer.Pricer
-			}
-
-			arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
-
-			pricer := arbState
-			arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
-			isMember := arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
-
-			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
+			//if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
+			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !isMember {
 				return fmt.Errorf("%w: address %v, maxFeePerGas: %s, baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
 			}
@@ -458,28 +454,28 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.msg.GasTipCap = common.Big0
 	}
 
-	type SubspaceID []byte
-	var (
-		pricerSubspace SubspaceID = []byte{8}
-	)
-	burner := burn.NewSystemBurner(nil, true)
-	backingStorage := storage.NewGeth(st.evm.StateDB, burner)
-
-	type ArbosState struct {
-		pricer *pricer.Pricer
+	arbState := NewVmState(&st.evm.StateDB)
+	isMember := arbState.PricerState.IsCustomPriceTxCheck(st.msg.Tx)
+	if err != nil {
+		return nil, err
 	}
-
-	arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
-
-	pricer := arbState
-	arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
-	isMember := arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
-
 	if st.msg != nil && st.msg.To != nil && isMember {
 		st.msg.GasPrice = common.Big0
 		st.msg.GasFeeCap = common.Big0
 		st.msg.GasTipCap = common.Big0
 	}
+
+	//type SubspaceID []byte
+	//var (
+	//	pricerSubspace SubspaceID = []byte{8}
+	//)
+	//burner := burn.NewSystemBurner(nil, true)
+	//backingStorage := storage.NewGeth(st.evm.StateDB, burner)
+	//
+	//pricer := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+	//
+	//arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
+	//isMember := arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
 
 	// Check clauses 1-3, buy gas if everything is correct
 	if err := st.preCheck(); err != nil {
@@ -493,9 +489,21 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		}()
 	}
 
+	sender := st.msg.From
+	oriSender := st.msg.From
+
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(sender, *st.msg.To, st.msg.Data)
+	if err != nil {
+		return nil, err
+	}
+	if parentAccount != nil {
+		sender.SetBytes(parentAccount.Bytes())
+		st.msg.From.SetBytes(sender.Bytes())
+	}
+
 	var (
 		msg              = st.msg
-		sender           = vm.AccountRef(msg.From)
+		senderRef        = vm.AccountRef(sender)
 		rules            = st.evm.ChainConfig().Rules(st.evm.Context.BlockNumber, st.evm.Context.Random != nil, st.evm.Context.Time, st.evm.Context.ArbOSVersion)
 		contractCreation = msg.To == nil
 	)
@@ -543,11 +551,14 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	)
 	if contractCreation {
 		deployedContract = &common.Address{}
-		ret, *deployedContract, st.gasRemaining, vmerr = st.evm.Create(sender, msg.Data, st.gasRemaining, value)
+		ret, *deployedContract, st.gasRemaining, vmerr = st.evm.Create(senderRef, msg.Data, st.gasRemaining, value)
 	} else {
 		// Increment the nonce for the next transaction
-		st.state.SetNonce(msg.From, st.state.GetNonce(sender.Address())+1)
-		ret, st.gasRemaining, vmerr = st.evm.Call(sender, st.to(), msg.Data, st.gasRemaining, value)
+		if oriSender.Cmp(sender) != 0 {
+			st.state.SetNonce(sender, st.state.GetNonce(sender)+1)
+		}
+		st.state.SetNonce(oriSender, st.state.GetNonce(oriSender)+1)
+		ret, st.gasRemaining, vmerr = st.evm.Call(senderRef, st.to(), msg.Data, st.gasRemaining, value)
 	}
 
 	var gasRefund uint64
@@ -559,7 +570,8 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		gasRefund = st.refundGas(params.RefundQuotientEIP3529)
 	}
 	effectiveTip := msg.GasPrice
-	if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
+	//if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
+	if rules.IsLondon && !isMember {
 		effectiveTip = cmath.BigMin(msg.GasTipCap, new(big.Int).Sub(msg.GasFeeCap, st.evm.Context.BaseFee))
 	}
 	effectiveTipU256, _ := uint256.FromBig(effectiveTip)

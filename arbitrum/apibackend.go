@@ -358,6 +358,26 @@ func (a *APIBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber)
 	return a.headerByNumberImpl(ctx, number)
 }
 
+func (a *APIBackend) ArbStateByBlockNumber(ctx context.Context, number rpc.BlockNumber) (*core.ArbState, error) {
+	var state *state.StateDB
+
+	header, err := a.HeaderByNumber(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		return nil, errors.New("header not found")
+	}
+
+	stateDb, err := a.b.BlockChain().StateAt(header.Root)
+	if err != nil {
+		return nil, err
+	}
+	state = stateDb
+
+	return core.New(state), nil
+}
+
 func (a *APIBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
 	return a.BlockChain().GetHeaderByHash(hash), nil
 }

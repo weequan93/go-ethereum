@@ -113,7 +113,7 @@ func (t *fourByteTracer) CaptureEnter(op vm.OpCode, from common.Address, to comm
 
 // GetResult returns the json-encoded nested list of call traces, and any
 // error arising from the encoding or forceful termination (via `Stop`).
-func (t *fourByteTracer) GetResult() (json.RawMessage, error) {
+func (t *fourByteTracer) GetResult(from *common.Address) (json.RawMessage, error) {
 	res, err := json.Marshal(t.ids)
 	if err != nil {
 		return nil, err

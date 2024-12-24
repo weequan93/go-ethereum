@@ -236,7 +236,7 @@ func (l *StructLogger) CaptureEnter(typ vm.OpCode, from common.Address, to commo
 func (l *StructLogger) CaptureExit(output []byte, gasUsed uint64, err error) {
 }
 
-func (l *StructLogger) GetResult() (json.RawMessage, error) {
+func (l *StructLogger) GetResult(from *common.Address) (json.RawMessage, error) {
 	// Tracing aborted
 	if l.reason != nil {
 		return nil, l.reason
