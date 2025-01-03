@@ -812,13 +812,12 @@ func (s *BlockChainAPI) GetHeaderByHash(ctx context.Context, hash common.Hash) m
 //     only the transaction hash is returned.
 func (s *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
 
-	arbState, err := s.b.ArbStateByBlockNumber(ctx, number)
-	if err != nil {
-		return nil, err
-	}
-
 	block, err := s.b.BlockByNumber(ctx, number)
+
 	if block != nil && err == nil {
+
+		arbState, _ := s.b.ArbStateByBlockNumber(ctx, number)
+
 		response, err := s.rpcMarshalBlock(ctx, block, true, fullTx, arbState)
 		if err == nil && number == rpc.PendingBlockNumber {
 			// Pending blocks need to nil out a few fields

@@ -1783,6 +1783,7 @@ func TestRPCGetBlockOrHeader(t *testing.T) {
 		} else {
 			if tt.reqHeader {
 				result, err = api.GetHeaderByNumber(context.Background(), tt.blockNumber)
+
 				rpc = "eth_getHeaderByNumber"
 			} else {
 				result, err = api.GetBlockByNumber(context.Background(), tt.blockNumber, tt.fullTx)
