@@ -492,7 +492,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	sender := st.msg.From
 	oriSender := st.msg.From
 
-	parentAccount, err := arbState.SubAccountState.GetParentAddress(sender, *st.msg.To, st.msg.Data)
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(sender, st.msg.To, st.msg.Data)
 	if err != nil {
 		return nil, err
 	}

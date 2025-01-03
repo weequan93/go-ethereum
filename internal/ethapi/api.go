@@ -1588,7 +1588,7 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 	from, _ := types.Sender(signer, tx)
 
 	if arbState != nil {
-		parentAccount, _ := arbState.SubAccountState.GetParentAddress(from, *tx.To(), tx.Data())
+		parentAccount, _ := arbState.SubAccountState.GetParentAddress(from, tx.To(), tx.Data())
 		if parentAccount != nil {
 			from.SetBytes(parentAccount.Bytes())
 		}
@@ -1944,7 +1944,7 @@ func (s *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common.H
 	if err != nil {
 		return nil, nil
 	}
-	parentAccount, err := arbState.SubAccountState.GetParentAddress(rpcTx.From, *rpcTx.To, rpcTx.Input)
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(rpcTx.From, rpcTx.To, rpcTx.Input)
 	if err != nil {
 		return nil, err
 	}
@@ -2001,12 +2001,12 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 // marshalReceipt marshals a transaction receipt into a JSON object.
 func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int, backend Backend) (map[string]interface{}, error) {
 	from, _ := types.Sender(signer, tx)
-	arbState, err := backend.ArbStateByBlockNumber(ctx, rpc.PendingBlockNumber)
+	arbState, err := backend.ArbStateByBlockNumber(ctx, rpc.EarliestBlockNumber)
 	if err != nil {
 		return nil, err
 	}
 
-	parentAccount, err := arbState.SubAccountState.GetParentAddress(from, *tx.To(), tx.Data())
+	parentAccount, err := arbState.SubAccountState.GetParentAddress(from, tx.To(), tx.Data())
 	if err != nil {
 		return nil, err
 	}
