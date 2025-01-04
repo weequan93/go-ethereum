@@ -115,7 +115,7 @@ func flatCallTracerTestRunner(tracerName string, filename string, dirPath string
 	}
 
 	// Retrieve the trace result and compare against the etalon
-	res, err := tracer.GetResult()
+	res, err := tracer.GetResult(nil)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve trace result: %v", err)
 	}

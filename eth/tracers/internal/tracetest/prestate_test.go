@@ -121,7 +121,7 @@ func testPrestateDiffTracer(tracerName string, dirPath string, t *testing.T) {
 				t.Fatalf("failed to execute transaction: %v", err)
 			}
 			// Retrieve the trace result and compare against the expected
-			res, err := tracer.GetResult()
+			res, err := tracer.GetResult(nil)
 			if err != nil {
 				t.Fatalf("failed to retrieve trace result: %v", err)
 			}
