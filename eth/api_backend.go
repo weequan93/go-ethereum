@@ -219,7 +219,7 @@ func (b *EthAPIBackend) ArbStateByBlockNumber(ctx context.Context, number rpc.Bl
 	var state *state.StateDB
 	// Pending state is only known by the miner
 	if number == rpc.PendingBlockNumber {
-		_, state = b.eth.miner.Pending()
+		_, _, state = b.eth.miner.Pending()
 		if state == nil {
 			return nil, errors.New("pending state is not available")
 		}
