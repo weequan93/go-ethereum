@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/onsi/ginkgo/reporters/stenographer/support/go-isatty"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -33,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/metrics/exp"
 	"github.com/mattn/go-colorable"
 	"github.com/urfave/cli/v2"
-	"golang.org/x/exp/slog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -230,9 +230,9 @@ func Setup(ctx *cli.Context) error {
 	case ctx.Bool(logjsonFlag.Name):
 		// Retain backwards compatibility with `--log.json` flag if `--log.format` not set
 		defer log.Warn("The flag '--log.json' is deprecated, please use '--log.format=json' instead")
-		handler = log.JSONHandler(output)
+		handler = log.JSONHandlerWithLevel(output, log.LevelInfo)
 	case logFmtFlag == "json":
-		handler = log.JSONHandler(output)
+		handler = log.JSONHandlerWithLevel(output, log.LevelInfo)
 	case logFmtFlag == "logfmt":
 		handler = log.LogfmtHandler(output)
 	case logFmtFlag == "", logFmtFlag == "terminal":

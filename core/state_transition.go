@@ -24,6 +24,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	cmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
@@ -198,13 +199,8 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
 	}
-
-	//if arbutil.IsGaslessTx(tx) {
-	//	msg.GasPrice = common.Big0
-	//}
 	var err error
 	msg.From, err = types.Sender(s, tx)
-
 	return msg, err
 }
 
@@ -274,7 +270,7 @@ func (st *StateTransition) to() common.Address {
 
 func (st *StateTransition) buyGas() error {
 	mgval := new(big.Int).SetUint64(st.msg.GasLimit)
-	mgval = mgval.Mul(mgval, st.msg.GasPrice)
+	mgval.Mul(mgval, st.msg.GasPrice)
 	balanceCheck := new(big.Int).Set(mgval)
 	if st.msg.GasFeeCap != nil {
 		balanceCheck.SetUint64(st.msg.GasLimit)
@@ -303,15 +299,19 @@ func (st *StateTransition) buyGas() error {
 	if err := st.gp.SubGas(st.msg.GasLimit); err != nil {
 		return err
 	}
-	st.gasRemaining += st.msg.GasLimit
+
+	if st.evm.Config.Tracer != nil && st.evm.Config.Tracer.OnGasChange != nil {
+		st.evm.Config.Tracer.OnGasChange(0, st.msg.GasLimit, tracing.GasChangeTxInitialBalance)
+	}
+	st.gasRemaining = st.msg.GasLimit
 
 	st.initialGas = st.msg.GasLimit
 	mgvalU256, _ := uint256.FromBig(mgval)
-	st.state.SubBalance(st.msg.From, mgvalU256)
+	st.state.SubBalance(st.msg.From, mgvalU256, tracing.BalanceDecreaseGasBuy)
 
 	// Arbitrum: record fee payment
-	if tracer := st.evm.Config.Tracer; tracer != nil {
-		tracer.CaptureArbitrumTransfer(st.evm, &st.msg.From, nil, mgval, true, "feePayment")
+	if tracer := st.evm.Config.Tracer; tracer != nil && tracer.CaptureArbitrumTransfer != nil {
+		tracer.CaptureArbitrumTransfer(&st.msg.From, nil, mgval, true, "feePayment")
 	}
 
 	return nil
@@ -363,20 +363,7 @@ func (st *StateTransition) preCheck() error {
 
 			arbState := arbitrum_core.NewVmState(&st.evm.StateDB)
 			isMember := arbState.PricerState.IsCustomPriceTxCheck(msg.Tx)
-			//type SubspaceID []byte
-			//var (
-			//	pricerSubspace SubspaceID = []byte{8}
-			//)
-			//burner := burn.NewSystemBurner(nil, true)
-			//backingStorage := storage.NewGeth(st.evm.StateDB, burner)
-			//
-			//arbState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
-			//
-			//pricer := arbState
-			//arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
-			//isMember := arbutil.IsCustomPriceTxCheck(pricer, msg.Tx)
 
-			//if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
 			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !isMember {
 				return fmt.Errorf("%w: address %v, maxFeePerGas: %s, baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
@@ -466,28 +453,9 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.msg.GasTipCap = common.Big0
 	}
 
-	//type SubspaceID []byte
-	//var (
-	//	pricerSubspace SubspaceID = []byte{8}
-	//)
-	//burner := burn.NewSystemBurner(nil, true)
-	//backingStorage := storage.NewGeth(st.evm.StateDB, burner)
-	//
-	//pricer := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
-	//
-	//arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
-	//isMember := arbutil.IsCustomPriceTxCheck(pricer, *&st.msg.Tx)
-
 	// Check clauses 1-3, buy gas if everything is correct
 	if err := st.preCheck(); err != nil {
 		return nil, err
-	}
-
-	if tracer := st.evm.Config.Tracer; tracer != nil {
-		tracer.CaptureTxStart(st.initialGas)
-		defer func() {
-			tracer.CaptureTxEnd(st.gasRemaining)
-		}()
 	}
 
 	sender := st.msg.From
@@ -516,6 +484,9 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	}
 	if st.gasRemaining < gas {
 		return nil, fmt.Errorf("%w: have %d, want %d", ErrIntrinsicGas, st.gasRemaining, gas)
+	}
+	if t := st.evm.Config.Tracer; t != nil && t.OnGasChange != nil {
+		t.OnGasChange(st.gasRemaining, st.gasRemaining-gas, tracing.GasChangeTxIntrinsicGas)
 	}
 	st.gasRemaining -= gas
 
@@ -571,7 +542,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		gasRefund = st.refundGas(params.RefundQuotientEIP3529)
 	}
 	effectiveTip := msg.GasPrice
-	//if rules.IsLondon && !arbutil.IsGaslessTx(msg.Tx) && !isMember {
+
 	if rules.IsLondon && !isMember {
 		effectiveTip = cmath.BigMin(msg.GasTipCap, new(big.Int).Sub(msg.GasFeeCap, st.evm.Context.BaseFee))
 	}
@@ -584,29 +555,25 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	} else {
 		fee := new(uint256.Int).SetUint64(st.gasUsed())
 		fee.Mul(fee, effectiveTipU256)
-		st.state.AddBalance(tipReceipient, fee)
+		st.state.AddBalance(tipReceipient, fee, tracing.BalanceIncreaseRewardTransactionFee)
 		tipAmount = fee.ToBig()
 	}
 
 	// Arbitrum: record the tip
-	if tracer := st.evm.Config.Tracer; tracer != nil && !st.evm.ProcessingHook.DropTip() {
-		tracer.CaptureArbitrumTransfer(st.evm, nil, &tipReceipient, tipAmount, false, "tip")
+	if tracer := st.evm.Config.Tracer; tracer != nil && !st.evm.ProcessingHook.DropTip() && tracer.CaptureArbitrumTransfer != nil {
+		tracer.CaptureArbitrumTransfer(nil, &tipReceipient, tipAmount, false, "tip")
 	}
 
 	st.evm.ProcessingHook.EndTxHook(st.gasRemaining, vmerr == nil)
 
 	// Arbitrum: record self destructs
-	if tracer := st.evm.Config.Tracer; tracer != nil {
+	if tracer := st.evm.Config.Tracer; tracer != nil && tracer.CaptureArbitrumTransfer != nil {
 		suicides := st.evm.StateDB.GetSelfDestructs()
 		for i, address := range suicides {
 			balance := st.evm.StateDB.GetBalance(address)
-			tracer.CaptureArbitrumTransfer(st.evm, &suicides[i], nil, balance.ToBig(), false, "selfDestruct")
+			tracer.CaptureArbitrumTransfer(&suicides[i], nil, balance.ToBig(), false, "selfDestruct")
 		}
 	}
-
-	//if oriSender.Cmp(sender) != 0 {
-	//	st.msg.From.SetBytes(oriSender.Bytes())
-	//}
 
 	return &ExecutionResult{
 		UsedGas:          st.gasUsed(),
@@ -631,14 +598,24 @@ func (st *StateTransition) refundGas(refundQuotient uint64) uint64 {
 		st.gasRemaining += refund
 	}
 
+	if st.evm.Config.Tracer != nil && st.evm.Config.Tracer.OnGasChange != nil && refund > 0 {
+		st.evm.Config.Tracer.OnGasChange(st.gasRemaining, st.gasRemaining+refund, tracing.GasChangeTxRefunds)
+	}
+
+	st.gasRemaining += refund
+
 	// Return ETH for remaining gas, exchanged at the original rate.
 	remaining := uint256.NewInt(st.gasRemaining)
-	remaining = remaining.Mul(remaining, uint256.MustFromBig(st.msg.GasPrice))
-	st.state.AddBalance(st.msg.From, remaining)
+	remaining.Mul(remaining, uint256.MustFromBig(st.msg.GasPrice))
+	st.state.AddBalance(st.msg.From, remaining, tracing.BalanceIncreaseGasReturn)
+
+	if st.evm.Config.Tracer != nil && st.evm.Config.Tracer.OnGasChange != nil && st.gasRemaining > 0 {
+		st.evm.Config.Tracer.OnGasChange(st.gasRemaining, 0, tracing.GasChangeTxLeftOverReturned)
+	}
 
 	// Arbitrum: record the gas refund
-	if tracer := st.evm.Config.Tracer; tracer != nil {
-		tracer.CaptureArbitrumTransfer(st.evm, nil, &st.msg.From, remaining.ToBig(), false, "gasRefund")
+	if tracer := st.evm.Config.Tracer; tracer != nil && tracer.CaptureArbitrumTransfer != nil {
+		tracer.CaptureArbitrumTransfer(nil, &st.msg.From, remaining.ToBig(), false, "gasRefund")
 	}
 
 	// Also return remaining gas to the block gas counter so it is

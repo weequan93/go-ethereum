@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/arbitrum-core"
 	"math/big"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/arbitrum_types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -51,6 +53,22 @@ type APIBackend struct {
 	sync           SyncProgressBackend
 }
 
+type errorFilteredFallbackClient struct {
+	impl types.FallbackClient
+	url  string
+}
+
+func (c *errorFilteredFallbackClient) CallContext(ctx context.Context, result interface{}, method string, args ...interface{}) error {
+	err := c.impl.CallContext(ctx, result, method, args...)
+	if err != nil && strings.Contains(err.Error(), c.url) {
+		// avoids leaking the URL in the error message.
+		// URL can contain sensitive information such as API keys.
+		log.Warn("fallback client error", "error", err)
+		return errors.New("Failed to call fallback API")
+	}
+	return err
+}
+
 type timeoutFallbackClient struct {
 	impl    types.FallbackClient
 	timeout time.Duration
@@ -77,12 +95,22 @@ func CreateFallbackClient(fallbackClientUrl string, fallbackClientTimeout time.D
 		types.SetFallbackError(strings.Join(fields, ":"), int(errNumber))
 		return nil, nil
 	}
+
 	var fallbackClient types.FallbackClient
 	var err error
 	fallbackClient, err = rpc.Dial(fallbackClientUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed creating fallback connection: %w", err)
 	}
+	url, err := url.Parse(fallbackClientUrl)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing fallback URL: %w", err)
+	}
+	fallbackClient = &errorFilteredFallbackClient{
+		impl: fallbackClient,
+		url:  url.String(),
+	}
+
 	if fallbackClientTimeout != 0 {
 		fallbackClient = &timeoutFallbackClient{
 			impl:    fallbackClient,
@@ -96,6 +124,7 @@ type SyncProgressBackend interface {
 	SyncProgressMap() map[string]interface{}
 	SafeBlockNumber(ctx context.Context) (uint64, error)
 	FinalizedBlockNumber(ctx context.Context) (uint64, error)
+	BlockMetadataByNumber(blockNum uint64) (common.BlockMetadata, error)
 }
 
 func createRegisterAPIBackend(backend *Backend, filterConfig filters.Config, fallbackClientUrl string, fallbackClientTimeout time.Duration) (*filters.FilterSystem, error) {
@@ -133,7 +162,7 @@ func (a *APIBackend) GetAPIs(filterSystem *filters.FilterSystem) []rpc.API {
 	apis = append(apis, rpc.API{
 		Namespace: "eth",
 		Version:   "1.0",
-		Service:   filters.NewFilterAPI(filterSystem, false),
+		Service:   filters.NewFilterAPI(filterSystem),
 		Public:    true,
 	})
 
@@ -209,9 +238,10 @@ func (a *APIBackend) FeeHistory(
 	blocks uint64,
 	newestBlock rpc.BlockNumber,
 	rewardPercentiles []float64,
-) (*big.Int, [][]*big.Int, []*big.Int, []float64, error) {
+) (*big.Int, [][]*big.Int, []*big.Int, []float64, []*big.Int, []float64, error) {
+	// TODO: Add info about baseFeePerBlobGas, blobGasUsedRatio, just like in EthAPIBackend FeeHistory
 	if core.GetArbOSSpeedLimitPerSecond == nil {
-		return nil, nil, nil, nil, errors.New("ArbOS not installed")
+		return nil, nil, nil, nil, nil, nil, errors.New("ArbOS not installed")
 	}
 
 	nitroGenesis := rpc.BlockNumber(a.ChainConfig().ArbitrumChainParams.GenesisBlockNum)
@@ -224,7 +254,7 @@ func (a *APIBackend) FeeHistory(
 	}
 	if blocks < 1 {
 		// returning with no data and no error means there are no retrievable blocks
-		return common.Big0, nil, nil, nil, nil
+		return common.Big0, nil, nil, nil, nil, nil, nil
 	}
 
 	// don't attempt to include blocks before genesis
@@ -250,11 +280,11 @@ func (a *APIBackend) FeeHistory(
 	// note: while we could query this value for each block, it'd be prohibitively expensive
 	state, _, err := a.StateAndHeaderByNumber(ctx, newestBlock)
 	if err != nil {
-		return common.Big0, nil, nil, nil, err
+		return common.Big0, nil, nil, nil, nil, nil, err
 	}
 	speedLimit, err := core.GetArbOSSpeedLimitPerSecond(state)
 	if err != nil {
-		return common.Big0, nil, nil, nil, err
+		return common.Big0, nil, nil, nil, nil, nil, err
 	}
 
 	gasUsed := make([]float64, blocks)
@@ -271,14 +301,14 @@ func (a *APIBackend) FeeHistory(
 	if rpc.BlockNumber(oldestBlock) > nitroGenesis {
 		header, err := a.HeaderByNumber(ctx, rpc.BlockNumber(oldestBlock-1))
 		if err != nil {
-			return common.Big0, nil, nil, nil, err
+			return common.Big0, nil, nil, nil, nil, nil, err
 		}
 		prevTimestamp = header.Time
 	}
 	for block := oldestBlock; block <= uint64(baseFeeLookup); block++ {
 		header, err := a.HeaderByNumber(ctx, rpc.BlockNumber(block))
 		if err != nil {
-			return common.Big0, nil, nil, nil, err
+			return common.Big0, nil, nil, nil, nil, nil, err
 		}
 		basefees[block-oldestBlock] = header.BaseFee
 
@@ -319,7 +349,14 @@ func (a *APIBackend) FeeHistory(
 		basefees[blocks] = basefees[blocks-1] // guess the basefee won't change
 	}
 
-	return big.NewInt(int64(oldestBlock)), rewards, basefees, gasUsed, nil
+	return big.NewInt(int64(oldestBlock)), rewards, basefees, gasUsed, nil, nil, nil
+}
+
+func (a *APIBackend) BlobBaseFee(ctx context.Context) *big.Int {
+	if excess := a.CurrentHeader().ExcessBlobGas; excess != nil {
+		return eip4844.CalcBlobFee(*excess)
+	}
+	return nil
 }
 
 func (a *APIBackend) ChainDb() ethdb.Database {
@@ -472,6 +509,10 @@ func (a *APIBackend) BlockByNumberOrHash(ctx context.Context, blockNrOrHash rpc.
 	return nil, errors.New("invalid arguments; neither block nor hash specified")
 }
 
+func (a *APIBackend) BlockMetadataByNumber(blockNum uint64) (common.BlockMetadata, error) {
+	return a.sync.BlockMetadataByNumber(blockNum)
+}
+
 func StateAndHeaderFromHeader(ctx context.Context, chainDb ethdb.Database, bc *core.BlockChain, maxRecreateStateDepth int64, header *types.Header, err error) (*state.StateDB, *types.Header, error) {
 	if err != nil {
 		return nil, header, err
@@ -577,7 +618,7 @@ func (a *APIBackend) StateAtBlock(ctx context.Context, block *types.Block, reexe
 	return eth.NewArbEthereum(a.b.arb.BlockChain(), a.ChainDb()).StateAtBlock(ctx, block, reexec, base, nil, checkLive, preferDisk)
 }
 
-func (a *APIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*core.Message, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
+func (a *APIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*types.Transaction, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	if !a.BlockChain().Config().IsArbitrumNitro(block.Number()) {
 		return nil, vm.BlockContext{}, nil, nil, types.ErrUseFallback
 	}
@@ -707,8 +748,8 @@ func (a *APIBackend) Engine() consensus.Engine {
 	return a.b.Engine()
 }
 
-func (b *APIBackend) PendingBlockAndReceipts() (*types.Block, types.Receipts) {
-	return nil, nil
+func (b *APIBackend) Pending() (*types.Block, types.Receipts, *state.StateDB) {
+	return nil, nil, nil
 }
 
 func (b *APIBackend) FallbackClient() types.FallbackClient {
