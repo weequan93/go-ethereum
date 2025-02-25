@@ -429,12 +429,21 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	// First check this message satisfies all consensus rules before
 	// applying the message. The rules include these clauses
 	//
+	// 0.9 check is in the blacklist
 	// 1. the nonce of the message caller is correct
 	// 2. caller has enough balance to cover transaction fee(gaslimit * gasprice)
 	// 3. the amount of gas required is available in the block
 	// 4. the purchased gas is enough to cover intrinsic usage
 	// 5. there is no overflow when calculating intrinsic gas
 	// 6. caller has enough balance to cover asset transfer for **topmost** call
+	arbState := arbitrum_core.NewVmState(&st.evm.StateDB)
+	isBlacklist := arbState.BlacklistState.IsBlacklistTxCheck(&st.msg.From, st.msg.Tx)
+	if err != nil {
+		return nil, err
+	}
+	if st.msg != nil && st.msg.To != nil && isBlacklist {
+		return nil, fmt.Errorf("%w", ErrTxBlacklist)
+	}
 
 	// Arbitrum: drop tip for delayed (and old) messages
 	if st.evm.ProcessingHook.DropTip() && st.msg.GasPrice.Cmp(st.evm.Context.BaseFee) > 0 {
@@ -442,7 +451,6 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		st.msg.GasTipCap = common.Big0
 	}
 
-	arbState := arbitrum_core.NewVmState(&st.evm.StateDB)
 	isMember := arbState.PricerState.IsCustomPriceTxCheck(st.msg.Tx)
 	if err != nil {
 		return nil, err

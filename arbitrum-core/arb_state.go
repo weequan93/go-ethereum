@@ -1,6 +1,7 @@
 package arbitrum_core
 
 import (
+	"github.com/ethereum/go-ethereum/arbitrum-core/arbos/blacklist"
 	"github.com/ethereum/go-ethereum/arbitrum-core/arbos/burn"
 	"github.com/ethereum/go-ethereum/arbitrum-core/arbos/pricer"
 	"github.com/ethereum/go-ethereum/arbitrum-core/arbos/storage"
@@ -12,6 +13,7 @@ import (
 type ArbState struct {
 	PricerState     *pricer.Pricer
 	SubAccountState *subAccount.SubAccountState
+	BlacklistState  *blacklist.Blacklist
 }
 
 type SubspaceID []byte
@@ -19,6 +21,7 @@ type SubspaceID []byte
 var (
 	pricerSubspace     SubspaceID = []byte{8}
 	subAccountSubspace SubspaceID = []byte{10}
+	blacklistSubspace  SubspaceID = []byte{12}
 )
 
 func New(state *state.StateDB) *ArbState {
@@ -26,10 +29,12 @@ func New(state *state.StateDB) *ArbState {
 	backingStorage := storage.NewGeth(state, burner)
 	subAccountState := subAccount.OpenSubAccountState(backingStorage.OpenSubStorage(subAccountSubspace))
 	pricerSubState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+	blacklistSubState := blacklist.OpenBlacklist(backingStorage.OpenSubStorage(blacklistSubspace))
 
 	return &ArbState{
 		SubAccountState: subAccountState,
 		PricerState:     pricerSubState,
+		BlacklistState:  blacklistSubState,
 	}
 }
 
@@ -38,9 +43,11 @@ func NewVmState(state *vm.StateDB) *ArbState {
 	backingStorage := storage.NewGeth(*state, burner)
 	subAccountState := subAccount.OpenSubAccountState(backingStorage.OpenSubStorage(subAccountSubspace))
 	pricerSubState := pricer.OpenPricer(backingStorage.OpenSubStorage(pricerSubspace))
+	blacklistSubState := blacklist.OpenBlacklist(backingStorage.OpenSubStorage(blacklistSubspace))
 
 	return &ArbState{
 		SubAccountState: subAccountState,
 		PricerState:     pricerSubState,
+		BlacklistState:  blacklistSubState,
 	}
 }

@@ -107,4 +107,7 @@ var (
 
 	// ErrBlobTxCreate is returned if a blob transaction has no explicit to field.
 	ErrBlobTxCreate = errors.New("blob transaction of type create")
+
+	// ErrTxBlacklist is returned if tx from / to is on blacklist.
+	ErrTxBlacklist = errors.New("sender / receiver blacklisted")
 )

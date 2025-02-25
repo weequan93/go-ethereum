@@ -29,6 +29,8 @@ var DeriwGaslessPublicAddress = common.HexToAddress("0x7E7")
 var DeriwGaslessAddress = common.HexToAddress("0x7E8")
 var DeriwSubAccountPublicAddress = common.HexToAddress("0x7E9")
 var DeriwSubAccountAddress = common.HexToAddress("0x7EA")
+var DeriwBlacklistPublicAddress = common.HexToAddress("0x7EB")
+var DeriwBlacklistAddress = common.HexToAddress("0x7EC")
 
 type arbitrumSigner struct{ Signer }
 
