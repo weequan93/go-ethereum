@@ -45,8 +45,7 @@ func (pricer *Pricer) IsCustomPriceTxCheck(tx *types.Transaction) bool {
 	if tx != nil {
 	}
 	if tx != nil && tx.To() != nil {
-		addr := common.HexToAddress(tx.To().String())
-		IsGaslessContract, err := pricer.TxToAddrs().IsMember(addr)
+		IsGaslessContract, err := pricer.TxToAddrs().IsMember(*tx.To())
 		if err != nil {
 			return false
 		}

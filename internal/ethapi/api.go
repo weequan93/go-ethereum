@@ -2020,7 +2020,7 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 // marshalReceipt marshals a transaction receipt into a JSON object.
 func marshalReceipt(ctx context.Context, receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int, backend Backend) (map[string]interface{}, error) {
 	from, _ := types.Sender(signer, tx)
-	arbState, err := backend.ArbStateByBlockNumber(ctx, rpc.EarliestBlockNumber)
+	arbState, err := backend.ArbStateByBlockNumber(ctx, rpc.BlockNumber(receipt.BlockNumber.Int64()))
 	if err != nil {
 		return nil, err
 	}
