@@ -1310,6 +1310,9 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		if args.MaxFeePerGas != nil {
 			args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
 		}
+		if args.GasPrice == nil && args.MaxFeePerGas == nil {
+			args.GasPrice = (*hexutil.Big)(common.Big0)
+		}
 	}
 
 	// var (
