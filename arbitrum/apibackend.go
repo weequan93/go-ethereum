@@ -187,6 +187,13 @@ func (a *APIBackend) GetAPIs(filterSystem *filters.FilterSystem) []rpc.API {
 		Public:    true,
 	})
 
+	apis = append(apis, rpc.API{
+		Namespace: "eth",
+		Version:   "1.0",
+		Service:   NewDeriwTransactionAPI(a),
+		Public:    true,
+	})
+
 	apis = append(apis, tracers.APIs(a)...)
 
 	return apis
@@ -754,4 +761,8 @@ func (b *APIBackend) Pending() (*types.Block, types.Receipts, *state.StateDB) {
 
 func (b *APIBackend) FallbackClient() types.FallbackClient {
 	return b.fallbackClient
+}
+
+func (a *APIBackend) SendPriorityTransaction(ctx context.Context, signedTx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
+	return a.b.EnqueuePriorityL2Message(ctx, signedTx, options)
 }

@@ -112,3 +112,7 @@ func (b *Backend) Stop() error {
 	close(b.chanClose)
 	return nil
 }
+
+func (b *Backend) EnqueuePriorityL2Message(ctx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
+	return b.arb.PublishPriorityTransaction(ctx, tx, options)
+}
