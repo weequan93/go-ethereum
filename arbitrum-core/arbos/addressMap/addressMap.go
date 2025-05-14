@@ -138,20 +138,21 @@ func (as *AddressMap) Remove(addr common.Address, arbosVersion uint64) error {
 		return err
 	}
 	if slot < size {
-		atSize, err := as.backingStorage.GetByUint64(size)
-		if err != nil {
-			return err
-		}
-		err = as.backingStorage.SetByUint64(slot, atSize)
-		if err != nil {
-			return err
-		}
 
-		atSize, err = as.backingValue.GetByUint64(size)
+		atSize, err := as.backingValue.GetByUint64(size)
 		if err != nil {
 			return err
 		}
 		err = as.backingValue.SetByUint64(slot, atSize)
+		if err != nil {
+			return err
+		}
+
+		atSize, err = as.backingStorage.GetByUint64(size)
+		if err != nil {
+			return err
+		}
+		err = as.backingStorage.SetByUint64(slot, atSize)
 		if err != nil {
 			return err
 		}
