@@ -159,6 +159,51 @@ func (subAccountState *SubAccountState) SetUsedHash(hash common.Hash) error {
 	return err
 }
 
+func (subAccountState *SubAccountState) ResetAllRelationship() error {
+
+	err := subAccountState.childParentRelation.Clear()
+	if err != nil {
+		return err
+	}
+
+	err = subAccountState.parentChildRelation.Clear()
+	if err != nil {
+		return err
+	}
+
+	return err
+}
+
+func (subAccountState *SubAccountState) ResetAllRelationshipByIndex(size uint64) error {
+
+	err := subAccountState.childParentRelation.ClearBySize(size)
+	if err != nil {
+		return err
+	}
+
+	err = subAccountState.parentChildRelation.ClearBySize(size)
+	if err != nil {
+		return err
+	}
+
+	return err
+}
+
+func (subAccountState *SubAccountState) ResetAllRelationshipByPosition(addr common.Address) error {
+
+	err := subAccountState.childParentRelation.Remove(addr, 16)
+	if err != nil {
+		return err
+	}
+
+	err = subAccountState.parentChildRelation.Remove(addr, 16)
+	if err != nil {
+		return err
+	}
+
+	return err
+}
+
 func (subAccountState *SubAccountState) HasUsedHash(hash common.Hash) (bool, error) {
 	hashContent, err := subAccountState.hashSpend.Get(hash)
 	hasUsed := false
@@ -242,4 +287,10 @@ func (subAccountState *SubAccountState) IsAllowedUsdtAddress(contractAddress com
 
 func (subAccountState *SubAccountState) UsdtAddress() *addressSet.AddressSet {
 	return subAccountState.usdtAddress
+}
+
+func (subAccountState *SubAccountState) ReadAccountGranted(parentAccount common.Address) (common.Address, error) {
+	//parentAccount, err := subAccountState.childParentRelation.Get(common.BytesToHash(subAccount.Bytes()))
+	subAccount, err := subAccountState.parentChildRelation.GetMember(parentAccount)
+	return subAccount, err
 }

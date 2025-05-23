@@ -27,10 +27,10 @@ func Initialize(sto *storage.Storage) error {
 
 func OpenAddressMap(sto *storage.Storage) *AddressMap {
 	return &AddressMap{
-		backingStorage: sto.WithoutCache(),
-		backingValue:   sto.WithoutCache(),
+		backingStorage: sto.OpenSubStorage([]byte{2}),
+		backingValue:   sto.OpenSubStorage([]byte{1}),
 		size:           sto.OpenStorageBackedUint64(0),
-		byAddress:      sto.OpenSubStorage([]byte{0}),
+		byAddress:      sto.OpenSubStorage([]byte{3}),
 	}
 }
 
@@ -54,6 +54,22 @@ func (as *AddressMap) GetMember(addr common.Address) (common.Address, error) {
 	value, _ := sba.Get()
 
 	return value, nil
+}
+
+func (as *AddressMap) ClearBySize(size uint64) error {
+
+	for i := uint64(1); i <= size; i++ {
+		contents, _ := as.backingStorage.GetByUint64(i)
+		_ = as.backingStorage.ClearByUint64(i)
+
+		_ = as.backingValue.ClearByUint64(i)
+
+		err := as.byAddress.Clear(contents)
+		if err != nil {
+			return err
+		}
+	}
+	return as.size.Clear()
 }
 
 func (as *AddressMap) Clear() error {
@@ -95,9 +111,13 @@ func (as *AddressMap) ClearList() error {
 
 func (as *AddressMap) Add(addr common.Address, value common.Address) error {
 	present, err := as.IsMember(addr)
+	if err != nil {
+		return err
+	}
 	if present || err != nil {
 		return err
 	}
+
 	size, err := as.size.Get()
 	if err != nil {
 		return err
@@ -109,6 +129,7 @@ func (as *AddressMap) Add(addr common.Address, value common.Address) error {
 		return err
 	}
 	sba := as.backingStorage.OpenStorageBackedAddress(1 + size)
+
 	err = sba.Set(addr)
 	if err != nil {
 		return err
@@ -172,6 +193,8 @@ func (as *AddressMap) Remove(addr common.Address, arbosVersion uint64) error {
 	if err != nil {
 		return err
 	}
-	_, err = as.size.Decrement()
+	if size > 0 {
+		_, err = as.size.Decrement()
+	}
 	return err
 }
