@@ -28,6 +28,12 @@ var ArbFilteredTransactionsManagerAddress = common.HexToAddress("0x74")
 var NodeInterfaceAddress = common.HexToAddress("0xc8")
 var NodeInterfaceDebugAddress = common.HexToAddress("0xc9")
 var ArbDebugAddress = common.HexToAddress("0xff")
+var DeriwGaslessPublicAddress = common.HexToAddress("0x7E7")
+var DeriwGaslessAddress = common.HexToAddress("0x7E8")
+var DeriwSubAccountPublicAddress = common.HexToAddress("0x7E9")
+var DeriwSubAccountAddress = common.HexToAddress("0x7EA")
+var DeriwBlacklistPublicAddress = common.HexToAddress("0x7EB")
+var DeriwBlacklistAddress = common.HexToAddress("0x7EC")
 var L1PricerFundsPoolAddress = common.HexToAddress("0xA4B00000000000000000000000000000000000f6")
 
 type arbitrumSigner struct{ Signer }

@@ -115,6 +115,10 @@ func (b *Backend) EnqueueL2Message(ctx context.Context, tx *types.Transaction, o
 	return b.arb.PublishTransaction(ctx, tx, options)
 }
 
+func (b *Backend) EnqueuePriorityL2Message(ctx context.Context, tx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
+	return b.arb.PublishPriorityTransaction(ctx, tx, options)
+}
+
 func (b *Backend) SubscribeNewTxsEvent(ch chan<- core.NewTxsEvent) event.Subscription {
 	return b.scope.Track(b.txFeed.Subscribe(ch))
 }

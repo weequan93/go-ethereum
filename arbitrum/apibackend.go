@@ -717,6 +717,10 @@ func (a *APIBackend) SendConditionalTx(ctx context.Context, signedTx *types.Tran
 	return a.b.EnqueueL2Message(ctx, signedTx, options)
 }
 
+func (a *APIBackend) SendPriorityTx(ctx context.Context, signedTx *types.Transaction, options *arbitrum_types.ConditionalOptions) error {
+	return a.b.EnqueuePriorityL2Message(ctx, signedTx, options)
+}
+
 func (a *APIBackend) GetCanonicalTransaction(txHash common.Hash) (bool, *types.Transaction, common.Hash, uint64, uint64) {
 	tx, blockHash, blockNumber, index := rawdb.ReadCanonicalTransaction(a.b.chainDb, txHash)
 	return tx != nil, tx, blockHash, blockNumber, index
