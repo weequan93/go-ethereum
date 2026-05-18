@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/database"
 )
 
 const (
@@ -175,18 +176,77 @@ type CachingDB struct {
 	disk          ethdb.KeyValueStore
 	wasmdb        ethdb.KeyValueStore
 	triedb        *triedb.Database
+	nodeDB        database.NodeDatabase
 	snap          *snapshot.Tree
 	codeCache     *lru.SizeConstrainedCache[common.Hash, []byte]
 	codeSizeCache *lru.Cache[common.Hash, int]
 	pointCache    *utils.PointCache
+	forceTrieRead bool
+	recorder      PreimageRecorder
 
 	// Transition-specific fields
 	TransitionStatePerRoot *lru.Cache[common.Hash, *overlay.TransitionState]
 }
 
+// PreimageRecorder records content-addressed blobs read while building a state.
+type PreimageRecorder interface {
+	RecordPreimage(hash common.Hash, blob []byte) error
+}
+
+// CachingDBConfig contains optional state database behavior overrides.
+type CachingDBConfig struct {
+	ForceTrieReads   bool
+	PreimageRecorder PreimageRecorder
+}
+
+// RecordTrieNodePreimages records trie nodes produced by a state commit, if this
+// database was configured with a preimage recorder.
+func (db *CachingDB) RecordTrieNodePreimages(nodes *trienode.MergedNodeSet) error {
+	if db.recorder == nil || nodes == nil {
+		return nil
+	}
+	for _, set := range nodes.Sets {
+		for _, node := range set.Nodes {
+			if node.IsDeleted() {
+				continue
+			}
+			if err := db.recorder.RecordPreimage(node.Hash, node.Blob); err != nil {
+				return err
+			}
+		}
+		for _, origin := range set.Origins {
+			if len(origin) == 0 {
+				continue
+			}
+			if err := db.recorder.RecordPreimage(crypto.Keccak256Hash(origin), origin); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // NewDatabase creates a state database with the provided data sources.
 func NewDatabase(triedb *triedb.Database, snap *snapshot.Tree) *CachingDB {
+	return NewDatabaseWithConfig(triedb, snap, nil)
+}
+
+// NewDatabaseWithConfig creates a state database with optional behavior overrides.
+func NewDatabaseWithConfig(triedb *triedb.Database, snap *snapshot.Tree, config *CachingDBConfig) *CachingDB {
 	wasmdb := triedb.Disk().WasmDataBase()
+	nodeDB := database.NodeDatabase(triedb)
+	var forceTrieRead bool
+	var recorder PreimageRecorder
+	if config != nil {
+		forceTrieRead = config.ForceTrieReads
+		recorder = config.PreimageRecorder
+		if recorder != nil {
+			nodeDB = &recordingNodeDatabase{
+				inner:    nodeDB,
+				recorder: recorder,
+			}
+		}
+	}
 	return &CachingDB{
 		// Arbitrum only
 		activatedAsmCache: lru.NewSizeConstrainedCache[activatedAsmCacheKey, []byte](activatedWasmCacheSize),
@@ -194,10 +254,13 @@ func NewDatabase(triedb *triedb.Database, snap *snapshot.Tree) *CachingDB {
 		disk:                   triedb.Disk(),
 		wasmdb:                 wasmdb,
 		triedb:                 triedb,
+		nodeDB:                 nodeDB,
 		snap:                   snap,
 		codeCache:              lru.NewSizeConstrainedCache[common.Hash, []byte](codeCacheSize),
 		codeSizeCache:          lru.NewCache[common.Hash, int](codeSizeCacheSize),
 		pointCache:             utils.NewPointCache(pointCacheSize),
+		forceTrieRead:          forceTrieRead,
+		recorder:               recorder,
 		TransitionStatePerRoot: lru.NewCache[common.Hash, *overlay.TransitionState](1000),
 	}
 }
@@ -215,7 +278,7 @@ func (db *CachingDB) Reader(stateRoot common.Hash) (Reader, error) {
 	// Configure the state reader using the standalone snapshot in hash mode.
 	// This reader offers improved performance but is optional and only
 	// partially useful if the snapshot is not fully generated.
-	if db.TrieDB().Scheme() == rawdb.HashScheme && db.snap != nil {
+	if !db.forceTrieRead && db.TrieDB().Scheme() == rawdb.HashScheme && db.snap != nil {
 		snap := db.snap.Snapshot(stateRoot)
 		if snap != nil {
 			readers = append(readers, newFlatReader(snap))
@@ -225,7 +288,7 @@ func (db *CachingDB) Reader(stateRoot common.Hash) (Reader, error) {
 	// This reader offers improved performance but is optional and only
 	// partially useful if the snapshot data in path database is not
 	// fully generated.
-	if db.TrieDB().Scheme() == rawdb.PathScheme {
+	if !db.forceTrieRead && db.TrieDB().Scheme() == rawdb.PathScheme {
 		reader, err := db.triedb.StateReader(stateRoot)
 		if err == nil {
 			readers = append(readers, newFlatReader(reader))
@@ -233,7 +296,7 @@ func (db *CachingDB) Reader(stateRoot common.Hash) (Reader, error) {
 	}
 	// Configure the trie reader, which is expected to be available as the
 	// gatekeeper unless the state is corrupted.
-	tr, err := newTrieReader(stateRoot, db.triedb, db.pointCache)
+	tr, err := newTrieReader(stateRoot, db.triedb, db.nodeDB, db.pointCache)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +306,14 @@ func (db *CachingDB) Reader(stateRoot common.Hash) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newReader(newCachingCodeReader(db.disk, db.codeCache, db.codeSizeCache), combined), nil
+	codeReader := ContractCodeReader(newCachingCodeReader(db.disk, db.codeCache, db.codeSizeCache))
+	if db.recorder != nil {
+		codeReader = &recordingCodeReader{
+			inner:    codeReader,
+			recorder: db.recorder,
+		}
+	}
+	return newReader(codeReader, combined), nil
 }
 
 // ReadersWithCacheStats creates a pair of state readers sharing the same internal cache and
@@ -269,7 +339,7 @@ func (db *CachingDB) OpenTrie(root common.Hash) (Trie, error) {
 			return trie.NewVerkleTrie(root, db.triedb, db.pointCache)
 		}
 	}
-	tr, err := trie.NewStateTrie(trie.StateTrieID(root), db.triedb)
+	tr, err := trie.NewStateTrie(trie.StateTrieID(root), db.nodeDB)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +351,7 @@ func (db *CachingDB) OpenStorageTrie(stateRoot common.Hash, address common.Addre
 	if db.triedb.IsVerkle() {
 		return self, nil
 	}
-	tr, err := trie.NewStateTrie(trie.StorageTrieID(stateRoot, crypto.Keccak256Hash(address.Bytes()), root), db.triedb)
+	tr, err := trie.NewStateTrie(trie.StorageTrieID(stateRoot, crypto.Keccak256Hash(address.Bytes()), root), db.nodeDB)
 	if err != nil {
 		return nil, err
 	}

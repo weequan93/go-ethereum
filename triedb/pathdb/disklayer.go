@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -336,59 +337,103 @@ func (dl *diskLayer) update(root common.Hash, id uint64, block uint64, nodes *no
 // buffer flushing is required, ensuring the persistent state ID is always
 // greater than or equal to the first history ID.
 func (dl *diskLayer) writeStateHistory(diff *diffLayer) (bool, error) {
-	// Short circuit if state history is not permitted
-	if dl.db.stateFreezer == nil {
+	// Short circuit if histories are not permitted.
+	if dl.db.stateFreezer == nil && dl.db.trienodeFreezer == nil {
 		return false, nil
 	}
-	// Bail out with an error if writing the state history fails.
+	// Bail out with an error if writing a history fails.
 	// This can happen, for example, if the device is full.
-	err := writeStateHistory(dl.db.stateFreezer, diff)
-	if err != nil {
-		return false, err
-	}
-	// Notify the state history indexer for newly created history
-	if dl.db.stateIndexer != nil {
-		if err := dl.db.stateIndexer.extend(diff.stateID()); err != nil {
+	if dl.db.stateFreezer != nil {
+		if err := writeStateHistory(dl.db.stateFreezer, diff); err != nil {
 			return false, err
 		}
+		// Notify the state history indexer for newly created history.
+		if dl.db.stateIndexer != nil {
+			if err := dl.db.stateIndexer.extend(diff.stateID()); err != nil {
+				return false, err
+			}
+		}
 	}
-	// Determine if the persisted history object has exceeded the
+	if dl.db.trienodeFreezer != nil {
+		if err := writeTrienodeHistory(dl.db.trienodeFreezer, diff); err != nil {
+			return false, err
+		}
+		// Notify the trienode history indexer for newly created history.
+		if dl.db.trienodeIndexer != nil {
+			if err := dl.db.trienodeIndexer.extend(diff.stateID()); err != nil {
+				return false, err
+			}
+		}
+	}
+	// Determine if the persisted history objects have exceeded the
 	// configured limitation.
 	limit := dl.db.config.StateHistory
 	if limit == 0 {
 		return false, nil
 	}
-	tail, err := dl.db.stateFreezer.Tail()
-	if err != nil {
-		return false, err
-	} // firstID = tail+1
-
-	// length = diff.stateID()-firstID+1 = diff.stateID()-tail
-	if diff.stateID()-tail <= limit {
-		return false, nil
+	var (
+		prune      bool
+		flush      bool
+		newFirst   uint64 // the id of first history **after truncation**
+		persistent = rawdb.ReadPersistentStateID(dl.db.diskdb)
+	)
+	for _, history := range []struct {
+		store ethdb.AncientStore
+		typ   historyType
+	}{
+		{store: dl.db.stateFreezer, typ: typeStateHistory},
+		{store: dl.db.trienodeFreezer, typ: typeTrienodeHistory},
+	} {
+		if history.store == nil {
+			continue
+		}
+		tail, err := history.store.Tail()
+		if err != nil {
+			return false, err
+		}
+		// length = diff.stateID()-firstID+1 = diff.stateID()-tail
+		if diff.stateID()-tail <= limit {
+			continue
+		}
+		candidateFirst := diff.stateID() - limit + 1
+		if newFirst == 0 || candidateFirst > newFirst {
+			newFirst = candidateFirst
+		}
+		prune = true
+		if persistent < candidateFirst {
+			log.Debug("Skip tail truncation", "type", history.typ.String(), "persistentID", persistent, "tailID", tail+1, "headID", diff.stateID(), "limit", limit)
+			flush = true
+		}
 	}
-	newFirst := diff.stateID() - limit + 1 // the id of first history **after truncation**
-
-	// In a rare case where the ID of the first history object (after tail
-	// truncation) exceeds the persisted state ID, we must take corrective
-	// steps:
-	//
-	// - Skip tail truncation temporarily, avoid the scenario that associated
-	//   history of persistent state is removed
-	//
-	// - Force a commit of the cached dirty states into persistent state
-	//
-	// These measures ensure the persisted state ID always remains greater
-	// than or equal to the first history ID.
-	if persistentID := rawdb.ReadPersistentStateID(dl.db.diskdb); persistentID < newFirst {
-		log.Debug("Skip tail truncation", "persistentID", persistentID, "tailID", tail+1, "headID", diff.stateID(), "limit", limit)
+	if flush {
 		return true, nil
 	}
-	pruned, err := truncateFromTail(dl.db.stateFreezer, typeStateHistory, newFirst-1)
-	if err != nil {
-		return false, err
+	if !prune {
+		return false, nil
 	}
-	log.Debug("Pruned state history", "items", pruned, "tailid", newFirst)
+	for _, history := range []struct {
+		store ethdb.AncientStore
+		typ   historyType
+	}{
+		{store: dl.db.stateFreezer, typ: typeStateHistory},
+		{store: dl.db.trienodeFreezer, typ: typeTrienodeHistory},
+	} {
+		if history.store == nil {
+			continue
+		}
+		tail, err := history.store.Tail()
+		if err != nil {
+			return false, err
+		}
+		if diff.stateID()-tail <= limit {
+			continue
+		}
+		pruned, err := truncateFromTail(history.store, history.typ, newFirst-1)
+		if err != nil {
+			return false, err
+		}
+		log.Debug("Pruned history", "type", history.typ.String(), "items", pruned, "tailid", newFirst)
+	}
 	return false, nil
 }
 
@@ -513,6 +558,11 @@ func (dl *diskLayer) revert(h *stateHistory) (*diskLayer, error) {
 	// Unindex the corresponding state history
 	if dl.db.stateIndexer != nil {
 		if err := dl.db.stateIndexer.shorten(dl.id); err != nil {
+			return nil, err
+		}
+	}
+	if dl.db.trienodeIndexer != nil {
+		if err := dl.db.trienodeIndexer.shorten(dl.id); err != nil {
 			return nil, err
 		}
 	}

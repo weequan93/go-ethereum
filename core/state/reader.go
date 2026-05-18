@@ -18,6 +18,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -98,6 +99,41 @@ type ReaderWithStats interface {
 	GetStats() ReaderStats
 }
 
+type recordingNodeDatabase struct {
+	inner    database.NodeDatabase
+	recorder PreimageRecorder
+}
+
+func (db *recordingNodeDatabase) NodeReader(stateRoot common.Hash) (database.NodeReader, error) {
+	reader, err := db.inner.NodeReader(stateRoot)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingNodeReader{
+		inner:    reader,
+		recorder: db.recorder,
+	}, nil
+}
+
+type recordingNodeReader struct {
+	inner    database.NodeReader
+	recorder PreimageRecorder
+}
+
+func (r *recordingNodeReader) Node(owner common.Hash, path []byte, hash common.Hash) ([]byte, error) {
+	blob, err := r.inner.Node(owner, path, hash)
+	if err != nil || len(blob) == 0 {
+		return blob, err
+	}
+	if got := crypto.Keccak256Hash(blob); got != hash {
+		return nil, fmt.Errorf("recording trie node hash mismatch: have %s want %s", got, hash)
+	}
+	if err := r.recorder.RecordPreimage(hash, blob); err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
 // cachingCodeReader implements ContractCodeReader, accessing contract code either in
 // local key-value store or the shared code cache.
 //
@@ -109,6 +145,30 @@ type cachingCodeReader struct {
 	// they are natively thread-safe.
 	codeCache     *lru.SizeConstrainedCache[common.Hash, []byte]
 	codeSizeCache *lru.Cache[common.Hash, int]
+}
+
+type recordingCodeReader struct {
+	inner    ContractCodeReader
+	recorder PreimageRecorder
+}
+
+func (r *recordingCodeReader) Code(addr common.Address, codeHash common.Hash) ([]byte, error) {
+	code, err := r.inner.Code(addr, codeHash)
+	if err != nil || len(code) == 0 {
+		return code, err
+	}
+	if err := r.recorder.RecordPreimage(codeHash, code); err != nil {
+		return nil, err
+	}
+	return code, nil
+}
+
+func (r *recordingCodeReader) CodeSize(addr common.Address, codeHash common.Hash) (int, error) {
+	code, err := r.Code(addr, codeHash)
+	if err != nil {
+		return 0, err
+	}
+	return len(code), nil
 }
 
 // newCachingCodeReader constructs the code reader.
@@ -220,8 +280,9 @@ func (r *flatReader) Storage(addr common.Address, key common.Hash) (common.Hash,
 //
 // trieReader is safe for concurrent read.
 type trieReader struct {
-	root common.Hash      // State root which uniquely represent a state
-	db   *triedb.Database // Database for loading trie
+	root   common.Hash      // State root which uniquely represent a state
+	db     *triedb.Database // Database for loading trie
+	nodeDB database.NodeDatabase
 
 	// Main trie, resolved in constructor. Note either the Merkle-Patricia-tree
 	// or Verkle-tree is not safe for concurrent read.
@@ -234,13 +295,16 @@ type trieReader struct {
 
 // newTrieReader constructs a trie reader of the specific state. An error will be
 // returned if the associated trie specified by root is not existent.
-func newTrieReader(root common.Hash, db *triedb.Database, cache *utils.PointCache) (*trieReader, error) {
+func newTrieReader(root common.Hash, db *triedb.Database, nodeDB database.NodeDatabase, cache *utils.PointCache) (*trieReader, error) {
+	if nodeDB == nil {
+		nodeDB = db
+	}
 	var (
 		tr  Trie
 		err error
 	)
 	if !db.IsVerkle() {
-		tr, err = trie.NewStateTrie(trie.StateTrieID(root), db)
+		tr, err = trie.NewStateTrie(trie.StateTrieID(root), nodeDB)
 	} else {
 		tr, err = trie.NewVerkleTrie(root, db, cache)
 
@@ -249,7 +313,7 @@ func newTrieReader(root common.Hash, db *triedb.Database, cache *utils.PointCach
 		// to be picked.
 		ts := overlay.LoadTransitionState(db.Disk(), root, true)
 		if ts.InTransition() {
-			mpt, err := trie.NewStateTrie(trie.StateTrieID(ts.BaseRoot), db)
+			mpt, err := trie.NewStateTrie(trie.StateTrieID(ts.BaseRoot), nodeDB)
 			if err != nil {
 				return nil, err
 			}
@@ -262,6 +326,7 @@ func newTrieReader(root common.Hash, db *triedb.Database, cache *utils.PointCach
 	return &trieReader{
 		root:     root,
 		db:       db,
+		nodeDB:   nodeDB,
 		mainTrie: tr,
 		subRoots: make(map[common.Address]common.Hash),
 		subTries: make(map[common.Address]Trie),
@@ -324,7 +389,7 @@ func (r *trieReader) Storage(addr common.Address, key common.Hash) (common.Hash,
 				root = r.subRoots[addr]
 			}
 			var err error
-			tr, err = trie.NewStateTrie(trie.StorageTrieID(r.root, crypto.Keccak256Hash(addr.Bytes()), root), r.db)
+			tr, err = trie.NewStateTrie(trie.StorageTrieID(r.root, crypto.Keccak256Hash(addr.Bytes()), root), r.nodeDB)
 			if err != nil {
 				return common.Hash{}, err
 			}
