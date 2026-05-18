@@ -172,7 +172,7 @@ func (r *reader) Storage(accountHash, storageHash common.Hash) ([]byte, error) {
 func (db *Database) NodeReader(root common.Hash) (database.NodeReader, error) {
 	layer := db.tree.get(root)
 	if layer == nil {
-		return nil, fmt.Errorf("state %#x is not available", root)
+		return db.HistoricNodeReader(root)
 	}
 	return &reader{
 		db:          db,
@@ -180,6 +180,74 @@ func (db *Database) NodeReader(root common.Hash) (database.NodeReader, error) {
 		noHashCheck: db.isVerkle,
 		layer:       layer,
 	}, nil
+}
+
+// HistoricalNodeReader is a wrapper over history reader, providing access to
+// historical trie nodes.
+type HistoricalNodeReader struct {
+	db     *Database
+	reader *historyReader
+	id     uint64
+}
+
+// HistoricNodeReader constructs a reader for accessing trie nodes associated
+// with the requested historic state.
+func (db *Database) HistoricNodeReader(root common.Hash) (*HistoricalNodeReader, error) {
+	// Bail out if the trienode history hasn't been fully indexed.
+	if db.trienodeIndexer == nil || db.trienodeFreezer == nil {
+		return nil, fmt.Errorf("historical trie nodes for state %x are not available", root)
+	}
+	if !db.trienodeIndexer.inited() {
+		return nil, errors.New("trienode histories haven't been fully indexed yet")
+	}
+	id := rawdb.ReadStateID(db.diskdb, root)
+	if id == nil {
+		return nil, fmt.Errorf("state %#x is not available", root)
+	}
+	// Ensure the requested state is canonical. Historical states on side chains
+	// are not accessible.
+	meta, err := readTrienodeMetadata(db.trienodeFreezer, *id+1)
+	if err != nil {
+		return nil, err
+	}
+	if meta.parent != root {
+		return nil, fmt.Errorf("state %#x is not canonincal", root)
+	}
+	return &HistoricalNodeReader{
+		id:     *id,
+		db:     db,
+		reader: newHistoryReader(db.diskdb, db.trienodeFreezer),
+	}, nil
+}
+
+// Node implements database.NodeReader interface, retrieving the node with
+// specified node info from trie-node history.
+func (r *HistoricalNodeReader) Node(owner common.Hash, path []byte, hash common.Hash) ([]byte, error) {
+	r.db.tree.lock.RLock()
+	defer r.db.tree.lock.RUnlock()
+
+	dl := r.db.tree.base
+	latest, _, _, err := dl.node(owner, path, 0)
+	if err != nil {
+		return nil, err
+	}
+	blob, err := r.reader.read(newTrienodeIdentQuery(owner, path), r.id, dl.stateID(), latest)
+	if err != nil {
+		return nil, err
+	}
+	got, err := r.db.hasher(blob)
+	if err != nil {
+		return nil, err
+	}
+	if got != hash {
+		blobHex := "nil"
+		if len(blob) > 0 {
+			blobHex = hexutil.Encode(blob)
+		}
+		log.Error("Unexpected historical trie node", "owner", owner.Hex(), "path", path, "expect", hash.Hex(), "got", got.Hex(), "blob", blobHex)
+		return nil, fmt.Errorf("unexpected historical node: (%x %v), %x!=%x, blob: %s", owner, path, hash, got, blobHex)
+	}
+	return blob, nil
 }
 
 // StateReader returns a reader that allows access to the state data associated
@@ -250,16 +318,13 @@ func (r *HistoricalStateReader) AccountRLP(address common.Address) ([]byte, erro
 		historicalAccountReadTimer.UpdateSince(start)
 	}(time.Now())
 
-	// TODO(rjl493456442): Theoretically, the obtained disk layer could become stale
-	// within a very short time window.
-	//
-	// While reading the account data while holding `db.tree.lock` can resolve
-	// this issue, but it will introduce a heavy contention over the lock.
-	//
-	// Let's optimistically assume the situation is very unlikely to happen,
-	// and try to define a low granularity lock if the current approach doesn't
-	// work later.
-	dl := r.db.tree.bottom()
+	// Keep the disk-layer value and history lookup on the same layer-tree
+	// view. Otherwise the disk layer can advance between the two reads and
+	// historical reconstruction may mix state from different roots.
+	r.db.tree.lock.RLock()
+	defer r.db.tree.lock.RUnlock()
+
+	dl := r.db.tree.base
 	hash := crypto.Keccak256Hash(address.Bytes())
 	latest, err := dl.account(hash, 0)
 	if err != nil {
@@ -300,16 +365,13 @@ func (r *HistoricalStateReader) Storage(address common.Address, key common.Hash)
 		historicalStorageReadTimer.UpdateSince(start)
 	}(time.Now())
 
-	// TODO(rjl493456442): Theoretically, the obtained disk layer could become stale
-	// within a very short time window.
-	//
-	// While reading the account data while holding `db.tree.lock` can resolve
-	// this issue, but it will introduce a heavy contention over the lock.
-	//
-	// Let's optimistically assume the situation is very unlikely to happen,
-	// and try to define a low granularity lock if the current approach doesn't
-	// work later.
-	dl := r.db.tree.bottom()
+	// Keep the disk-layer value and history lookup on the same layer-tree
+	// view. Otherwise the disk layer can advance between the two reads and
+	// historical reconstruction may mix state from different roots.
+	r.db.tree.lock.RLock()
+	defer r.db.tree.lock.RUnlock()
+
+	dl := r.db.tree.base
 	addrHash := crypto.Keccak256Hash(address.Bytes())
 	keyHash := crypto.Keccak256Hash(key.Bytes())
 	latest, err := dl.storage(addrHash, keyHash, 0)

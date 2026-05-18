@@ -60,10 +60,16 @@ func (db *RecordingKV) Get(key []byte) ([]byte, error) {
 	var res []byte
 	var err error
 	if len(key) == 32 {
+		if db.inner == nil {
+			return nil, errors.New("recording KV has no hashdb trie reader")
+		}
 		copy(hash[:], key)
 		res, err = db.inner.Node(hash)
 	} else if len(key) == len(rawdb.CodePrefix)+32 && bytes.HasPrefix(key, rawdb.CodePrefix) {
 		// Retrieving code
+		if db.diskDb == nil {
+			return nil, errors.New("recording KV has no disk database")
+		}
 		copy(hash[:], key[len(rawdb.CodePrefix):])
 		res, err = db.diskDb.Get(key)
 	} else {
@@ -137,6 +143,19 @@ func (db *RecordingKV) EnableBypass() {
 	db.enableBypass = true
 }
 
+func (db *RecordingKV) RecordPreimage(hash common.Hash, blob []byte) error {
+	if len(blob) == 0 {
+		return nil
+	}
+	if got := crypto.Keccak256Hash(blob); got != hash {
+		return fmt.Errorf("recording preimage hash mismatch: have %s want %s", got, hash)
+	}
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+	db.readDbEntries[hash] = blob
+	return nil
+}
+
 type RecordingChainContext struct {
 	bc                     core.ChainContext
 	minBlockNumberAccessed uint64
@@ -208,11 +227,21 @@ type RecordingDatabase struct {
 	config     *RecordingDatabaseConfig
 	db         state.Database
 	bc         *core.BlockChain
+	scheme     string
 	mutex      sync.Mutex // protects StateFor and Dereference
 	references int64
 }
 
 func NewRecordingDatabase(config *RecordingDatabaseConfig, ethdb ethdb.Database, blockchain *core.BlockChain) *RecordingDatabase {
+	scheme := blockchain.TrieDB().Scheme()
+	if scheme == rawdb.PathScheme {
+		return &RecordingDatabase{
+			config: config,
+			db:     state.NewDatabase(blockchain.TrieDB(), nil),
+			bc:     blockchain,
+			scheme: scheme,
+		}
+	}
 	hashConfig := *hashdb.Defaults
 	hashConfig.CleanCacheSize = config.TrieCleanCache
 	trieConfig := triedb.Config{
@@ -223,17 +252,21 @@ func NewRecordingDatabase(config *RecordingDatabaseConfig, ethdb ethdb.Database,
 		config: config,
 		db:     state.NewDatabase(triedb.NewDatabase(ethdb, &trieConfig), nil),
 		bc:     blockchain,
+		scheme: scheme,
 	}
 }
 
 // Normal geth state.New + Reference is not atomic vs Dereference. This one is.
 // This function does not recreate a state
 func (r *RecordingDatabase) StateFor(header *types.Header) (*state.StateDB, error) {
+	if header == nil {
+		return state.NewRecording(common.Hash{}, r.db)
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
 	sdb, err := state.NewRecording(header.Root, r.db)
-	if err == nil {
+	if err == nil && r.scheme != rawdb.PathScheme {
 		r.referenceRootLockHeld(header.Root)
 	}
 	return sdb, err
@@ -246,6 +279,9 @@ func (r *RecordingDatabase) Dereference(header *types.Header) {
 }
 
 func (r *RecordingDatabase) WriteStateToDatabase(header *types.Header) error {
+	if r.scheme == rawdb.PathScheme {
+		return nil
+	}
 	if header != nil {
 		return r.db.TrieDB().Commit(header.Root, true)
 	}
@@ -260,6 +296,9 @@ func (r *RecordingDatabase) referenceRootLockHeld(root common.Hash) {
 }
 
 func (r *RecordingDatabase) dereferenceRoot(root common.Hash) {
+	if r.scheme == rawdb.PathScheme {
+		return
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.references--
@@ -268,6 +307,9 @@ func (r *RecordingDatabase) dereferenceRoot(root common.Hash) {
 }
 
 func (r *RecordingDatabase) addStateVerify(statedb *state.StateDB, expected common.Hash, blockNumber uint64) (*state.StateDB, error) {
+	if r.scheme == rawdb.PathScheme {
+		return nil, errors.New("pathdb recording does not support sidecar state recreation")
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	result, err := statedb.Commit(blockNumber, true, false)
@@ -292,6 +334,9 @@ func (r *RecordingDatabase) addStateVerify(statedb *state.StateDB, expected comm
 }
 
 func (r *RecordingDatabase) PrepareRecording(ctx context.Context, lastBlockHeader *types.Header, logFunc StateBuildingLogFunction) (*state.StateDB, core.ChainContext, *RecordingKV, error) {
+	if r.scheme == rawdb.PathScheme {
+		return r.preparePathRecording(ctx, lastBlockHeader, logFunc)
+	}
 	_, err := r.GetOrRecreateState(ctx, lastBlockHeader, logFunc)
 	if err != nil {
 		return nil, nil, nil, err
@@ -321,6 +366,37 @@ func (r *RecordingDatabase) PrepareRecording(ctx context.Context, lastBlockHeade
 	return recordingStateDb, recordingChainContext, recordingKeyValue, nil
 }
 
+func (r *RecordingDatabase) preparePathRecording(ctx context.Context, lastBlockHeader *types.Header, logFunc StateBuildingLogFunction) (*state.StateDB, core.ChainContext, *RecordingKV, error) {
+	if _, err := r.GetOrRecreateState(ctx, lastBlockHeader, logFunc); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	recordingKeyValue := newRecordingKV(nil, r.db.DiskDB())
+	recordingStateDatabase := state.NewDatabaseWithConfig(r.bc.TrieDB(), nil, &state.CachingDBConfig{
+		ForceTrieReads:   true,
+		PreimageRecorder: recordingKeyValue,
+	})
+	var prevRoot common.Hash
+	if lastBlockHeader != nil {
+		prevRoot = lastBlockHeader.Root
+	}
+	recordingStateDb, err := state.NewRecording(prevRoot, recordingStateDatabase)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create pathdb recording state at root %s: %w", prevRoot, err)
+	}
+	recordingStateDb.StartRecording()
+	var recordingChainContext *RecordingChainContext
+	if lastBlockHeader != nil {
+		if !lastBlockHeader.Number.IsUint64() {
+			return nil, nil, nil, errors.New("block number not uint64")
+		}
+		recordingChainContext = newRecordingChainContext(r.bc, lastBlockHeader.Number.Uint64())
+	}
+	return recordingStateDb, recordingChainContext, recordingKeyValue, nil
+}
+
 func (r *RecordingDatabase) PreimagesFromRecording(chainContextIf core.ChainContext, recordingDb *RecordingKV) (map[common.Hash][]byte, error) {
 	entries := recordingDb.GetRecordedEntries()
 	recordingChainContext, ok := chainContextIf.(*RecordingChainContext)
@@ -341,6 +417,13 @@ func (r *RecordingDatabase) PreimagesFromRecording(chainContextIf core.ChainCont
 }
 
 func (r *RecordingDatabase) GetOrRecreateState(ctx context.Context, header *types.Header, logFunc StateBuildingLogFunction) (*state.StateDB, error) {
+	if r.scheme == rawdb.PathScheme {
+		state, err := r.StateFor(header)
+		if err != nil && header != nil {
+			return nil, fmt.Errorf("pathdb validation requires retained trie history for block %d root %s: %w", header.Number.Uint64(), header.Root, err)
+		}
+		return state, err
+	}
 	stateFor := func(header *types.Header) (*state.StateDB, StateReleaseFunc, error) {
 		state, err := r.StateFor(header)
 		// we don't use the release functor pattern here yet

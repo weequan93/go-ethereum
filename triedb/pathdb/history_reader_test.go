@@ -37,6 +37,16 @@ func waitIndexing(db *Database) {
 	}
 }
 
+func waitTrienodeIndexing(db *Database) {
+	for {
+		metadata := loadIndexMetadata(db.diskdb, typeTrienodeHistory)
+		if metadata != nil && metadata.Last >= db.tree.bottom().stateID() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func stateAvail(id uint64, env *tester) bool {
 	if env.db.config.StateHistory == 0 {
 		return true
@@ -206,4 +216,49 @@ func TestHistoricalStateReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+}
+
+func TestHistoricNodeReader(t *testing.T) {
+	config := &testerConfig{
+		stateHistory:  0,
+		layers:        8,
+		maxDiffLayers: 2,
+		enableIndex:   true,
+	}
+	env := newTester(t, config)
+	defer env.release()
+	waitTrienodeIndexing(env.db)
+
+	bottomID := env.db.tree.bottom().stateID()
+	for i, root := range env.roots {
+		stateID := uint64(i + 1)
+		if stateID >= bottomID || i+1 >= len(env.nodes) {
+			continue
+		}
+		reader, err := env.db.NodeReader(root)
+		if err != nil {
+			t.Fatalf("Failed to construct historical node reader: %v", err)
+		}
+		_, origins := env.nodes[i+1].NodeAndOrigins()
+		for owner, subset := range origins {
+			for path, blob := range subset {
+				if len(blob) == 0 {
+					continue
+				}
+				wantHash, err := env.db.hasher(blob)
+				if err != nil {
+					t.Fatalf("Failed to hash origin node: %v", err)
+				}
+				got, err := reader.Node(owner, []byte(path), wantHash)
+				if err != nil {
+					t.Fatalf("Failed to read historical node: %v", err)
+				}
+				if !bytes.Equal(got, blob) {
+					t.Fatalf("Unexpected historical node, want %x, got %x", blob, got)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("No historical node origin was available for the test")
 }

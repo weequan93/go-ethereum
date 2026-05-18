@@ -343,6 +343,11 @@ func (db *Database) Journal(root common.Hash) error {
 			return err
 		}
 	}
+	if db.trienodeFreezer != nil {
+		if err := db.trienodeFreezer.SyncAncient(); err != nil {
+			return err
+		}
+	}
 	// Store the journal into the database and return
 	var (
 		file        *os.File

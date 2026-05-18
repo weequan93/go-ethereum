@@ -61,6 +61,10 @@ type mutation struct {
 	applied bool
 }
 
+type trieNodePreimageRecorder interface {
+	RecordTrieNodePreimages(*trienode.MergedNodeSet) error
+}
+
 func (m *mutation) copy() *mutation {
 	return &mutation{typ: m.typ, applied: m.applied}
 }
@@ -1477,6 +1481,11 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool, noStorag
 	ret, err := s.commit(deleteEmptyObjects, noStorageWiping, block)
 	if err != nil {
 		return nil, err
+	}
+	if recorder, ok := s.db.(trieNodePreimageRecorder); ok {
+		if err := recorder.RecordTrieNodePreimages(ret.nodes); err != nil {
+			return nil, err
+		}
 	}
 	// Commit dirty contract code if any exists
 	if db := s.db.TrieDB().Disk(); db != nil && len(ret.codes) > 0 {

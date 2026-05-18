@@ -175,6 +175,23 @@ func (b *batchIndexer) makeBatch() ethdb.Batch {
 // memory limitation is reached or it's requested forcibly.
 func (b *batchIndexer) finish(force bool) error {
 	if b.pending == 0 {
+		if !force || b.lastID == 0 {
+			return nil
+		}
+		batch := b.db.NewBatch()
+		if !b.delete {
+			storeIndexMetadata(batch, b.typ, b.lastID)
+		} else {
+			if b.lastID == 1 {
+				deleteIndexMetadata(batch, b.typ)
+			} else {
+				storeIndexMetadata(batch, b.typ, b.lastID-1)
+			}
+		}
+		if err := batch.Write(); err != nil {
+			return err
+		}
+		log.Debug("Committed empty batch indexer", "type", b.typ, "last", b.lastID)
 		return nil
 	}
 	if !force && b.pending < historyIndexBatch {
