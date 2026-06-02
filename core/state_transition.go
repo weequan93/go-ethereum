@@ -470,12 +470,20 @@ func (st *stateTransition) to() common.Address {
 }
 
 func (st *stateTransition) buyGas() error {
+	skipGasFeePayment := st.skipBaseFeeCheck()
 	mgval := new(big.Int).SetUint64(st.msg.GasLimit)
 	mgval.Mul(mgval, st.msg.GasPrice)
 	balanceCheck := new(big.Int).Set(mgval)
+	if skipGasFeePayment {
+		mgval.SetUint64(0)
+		balanceCheck.SetUint64(0)
+	}
 	if st.msg.GasFeeCap != nil {
 		balanceCheck.SetUint64(st.msg.GasLimit)
 		balanceCheck = balanceCheck.Mul(balanceCheck, st.msg.GasFeeCap)
+		if skipGasFeePayment {
+			balanceCheck.SetUint64(0)
+		}
 	}
 	balanceCheck.Add(balanceCheck, st.msg.Value)
 	if st.evm.ChainConfig().IsCancun(st.evm.Context.BlockNumber, st.evm.Context.Time, st.evm.Context.ArbOSVersion) {
@@ -507,11 +515,13 @@ func (st *stateTransition) buyGas() error {
 	st.gasRemaining = st.msg.GasLimit
 
 	st.initialGas = st.msg.GasLimit
-	mgvalU256, _ := uint256.FromBig(mgval)
-	st.state.SubBalance(st.msg.From, mgvalU256, tracing.BalanceDecreaseGasBuy)
+	if !skipGasFeePayment {
+		mgvalU256, _ := uint256.FromBig(mgval)
+		st.state.SubBalance(st.msg.From, mgvalU256, tracing.BalanceDecreaseGasBuy)
+	}
 
 	// Arbitrum: record fee payment
-	if tracer := st.evm.Config.Tracer; tracer != nil && tracer.CaptureArbitrumTransfer != nil {
+	if tracer := st.evm.Config.Tracer; tracer != nil && !skipGasFeePayment && tracer.CaptureArbitrumTransfer != nil {
 		tracer.CaptureArbitrumTransfer(&st.msg.From, nil, mgval, true, tracing.BalanceDecreaseGasBuy)
 	}
 
@@ -568,7 +578,7 @@ func (st *stateTransition) preCheck() error {
 			}
 			// This will panic if baseFee is nil, but basefee presence is verified
 			// as part of header validation.
-			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 {
+			if msg.GasFeeCap.Cmp(st.evm.Context.BaseFee) < 0 && !st.skipBaseFeeCheck() {
 				return fmt.Errorf("%w: address %v, maxFeePerGas: %s, baseFee: %s", ErrFeeCapTooLow,
 					msg.From.Hex(), msg.GasFeeCap, st.evm.Context.BaseFee)
 			}
@@ -667,6 +677,17 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		return nil, err
 	}
 
+	originalFrom := st.msg.From
+	if st.evm.ProcessingHook != nil {
+		parent, ok, err := st.evm.ProcessingHook.SubAccountParent(originalFrom, st.msg.To, st.msg.Data)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			st.msg.From = parent
+		}
+	}
+
 	var (
 		msg              = st.msg
 		rules            = st.evm.ChainConfig().Rules(st.evm.Context.BlockNumber, st.evm.Context.Random != nil, st.evm.Context.Time, st.evm.Context.ArbOSVersion)
@@ -755,7 +776,10 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 			usedMultiGas = usedMultiGas.SaturatingAdd(multiGas)
 		} else {
 			// Increment the nonce for the next transaction.
-			st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1, tracing.NonceChangeEoACall)
+			if originalFrom != msg.From {
+				st.state.SetNonce(msg.From, st.state.GetNonce(msg.From)+1, tracing.NonceChangeEoACall)
+			}
+			st.state.SetNonce(originalFrom, st.state.GetNonce(originalFrom)+1, tracing.NonceChangeEoACall)
 
 			// Apply EIP-7702 authorizations.
 			if msg.SetCodeAuthorizations != nil {
@@ -812,13 +836,12 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 	if rules.IsLondon {
 		effectiveTip = new(big.Int).Sub(msg.GasPrice, st.evm.Context.BaseFee)
 	}
-	effectiveTipU256, _ := uint256.FromBig(effectiveTip)
 	gasUsed := st.gasUsed()
 
-	if st.evm.Config.NoBaseFee && msg.GasFeeCap.Sign() == 0 && msg.GasTipCap.Sign() == 0 {
+	if (st.evm.Config.NoBaseFee && msg.GasFeeCap.Sign() == 0 && msg.GasTipCap.Sign() == 0) || st.skipBaseFeeCheck() {
 		// Skip fee payment when NoBaseFee is set and the fee fields
 		// are 0. This avoids a negative effectiveTip being applied to
-		// the coinbase when simulating calls.
+		// the coinbase when simulating calls or custom-price txs.
 	} else {
 		// Only charge the tip on compute gas, not poster gas.
 		// The poster is compensated separately in EndTxHook.
@@ -826,6 +849,7 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		if gasUsed > posterGas {
 			computeGasUsed = gasUsed - posterGas
 		}
+		effectiveTipU256, _ := uint256.FromBig(effectiveTip)
 		fee := new(uint256.Int).SetUint64(computeGasUsed)
 		fee.Mul(fee, effectiveTipU256)
 		st.state.AddBalance(tipReceipient, fee, tracing.BalanceIncreaseRewardTransactionFee)
@@ -925,6 +949,10 @@ func (st *stateTransition) calcHeldGasRefund() uint64 {
 	return st.evm.ProcessingHook.HeldGas()
 }
 
+func (st *stateTransition) skipBaseFeeCheck() bool {
+	return st.evm.ProcessingHook != nil && st.evm.ProcessingHook.SkipBaseFeeCheck(st.msg.Tx)
+}
+
 // calcRefund computes refund counter, capped to a refund quotient.
 func (st *stateTransition) calcRefund() uint64 {
 	nonrefundable := st.evm.ProcessingHook.NonrefundableGas()
@@ -952,14 +980,19 @@ func (st *stateTransition) calcRefund() uint64 {
 func (st *stateTransition) returnGas() {
 	remaining := uint256.NewInt(st.gasRemaining)
 	remaining.Mul(remaining, uint256.MustFromBig(st.msg.GasPrice))
-	st.state.AddBalance(st.msg.From, remaining, tracing.BalanceIncreaseGasReturn)
+	skipGasFeePayment := st.skipBaseFeeCheck()
+	if skipGasFeePayment {
+		remaining.Clear()
+	} else {
+		st.state.AddBalance(st.msg.From, remaining, tracing.BalanceIncreaseGasReturn)
+	}
 
 	if st.evm.Config.Tracer != nil && st.evm.Config.Tracer.OnGasChange != nil && st.gasRemaining > 0 {
 		st.evm.Config.Tracer.OnGasChange(st.gasRemaining, 0, tracing.GasChangeTxLeftOverReturned)
 	}
 
 	// Arbitrum: record the gas refund
-	if tracer := st.evm.Config.Tracer; tracer != nil && tracer.CaptureArbitrumTransfer != nil {
+	if tracer := st.evm.Config.Tracer; tracer != nil && !skipGasFeePayment && tracer.CaptureArbitrumTransfer != nil {
 		tracer.CaptureArbitrumTransfer(nil, &st.msg.From, remaining.ToBig(), false, tracing.BalanceIncreaseGasReturn)
 	}
 

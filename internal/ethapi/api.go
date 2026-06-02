@@ -504,7 +504,11 @@ func (api *BlockChainAPI) GetHeaderByHash(ctx context.Context, hash common.Hash)
 func (api *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
 	block, err := api.b.BlockByNumber(ctx, number)
 	if block != nil && err == nil {
-		response := RPCMarshalBlock(block, true, fullTx, api.b.ChainConfig())
+		var statedb *state.StateDB
+		if fullTx && number != rpc.PendingBlockNumber {
+			statedb, _, _ = api.b.StateAndHeaderByNumberOrHash(ctx, rpc.BlockNumberOrHashWithNumber(number))
+		}
+		response := RPCMarshalBlockWithState(block, true, fullTx, api.b.ChainConfig(), statedb)
 		api.checkAndFillArbClassicL1BlockNumber(ctx, block, response)
 		if number == rpc.PendingBlockNumber {
 			// Pending blocks need to nil out a few fields
@@ -522,7 +526,11 @@ func (api *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.Block
 func (api *BlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Hash, fullTx bool) (map[string]interface{}, error) {
 	block, err := api.b.BlockByHash(ctx, hash)
 	if block != nil {
-		response := RPCMarshalBlock(block, true, fullTx, api.b.ChainConfig())
+		var statedb *state.StateDB
+		if fullTx {
+			statedb, _, _ = api.b.StateAndHeaderByNumberOrHash(ctx, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(block.NumberU64())))
+		}
+		response := RPCMarshalBlockWithState(block, true, fullTx, api.b.ChainConfig(), statedb)
 		api.checkAndFillArbClassicL1BlockNumber(ctx, block, response)
 		return response, nil
 	}
@@ -624,9 +632,10 @@ func (api *BlockChainAPI) GetBlockReceipts(ctx context.Context, blockNrOrHash rp
 		err      error
 		block    *types.Block
 		receipts types.Receipts
+		statedb  *state.StateDB
 	)
 	if blockNr, ok := blockNrOrHash.Number(); ok && blockNr == rpc.PendingBlockNumber {
-		block, receipts, _ = api.b.Pending()
+		block, receipts, statedb = api.b.Pending()
 		if block == nil {
 			return nil, errors.New("pending receipts is not available")
 		}
@@ -647,6 +656,9 @@ func (api *BlockChainAPI) GetBlockReceipts(ctx context.Context, blockNrOrHash rp
 	// Derive the sender.
 	arbosVersion := types.DeserializeHeaderExtraInformation(block.Header()).ArbOSFormatVersion
 	signer := types.MakeSigner(api.b.ChainConfig(), block.Number(), block.Time(), arbosVersion)
+	if api.b.ChainConfig().IsArbitrum() && statedb == nil {
+		statedb = rpcStateByBlockHash(ctx, api.b, block.Hash())
+	}
 
 	result := make([]map[string]interface{}, len(receipts))
 	for i, receipt := range receipts {
@@ -658,7 +670,7 @@ func (api *BlockChainAPI) GetBlockReceipts(ctx context.Context, blockNrOrHash rp
 		if err != nil {
 			return nil, err
 		}
-		result[i] = MarshalReceipt(receipt, block.Hash(), block.NumberU64(), signer, txs[i], i, api.b.ChainConfig(), header, blockMetadata)
+		result[i] = MarshalReceiptWithState(receipt, block.Hash(), block.NumberU64(), signer, txs[i], i, api.b.ChainConfig(), header, blockMetadata, statedb)
 	}
 	return result, nil
 }
@@ -1054,6 +1066,10 @@ func RPCMarshalHeader(head *types.Header) map[string]interface{} {
 // returned. When fullTx is true the returned block contains full transaction details, otherwise it will only contain
 // transaction hashes.
 func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *params.ChainConfig) map[string]interface{} {
+	return RPCMarshalBlockWithState(block, inclTx, fullTx, config, nil)
+}
+
+func RPCMarshalBlockWithState(block *types.Block, inclTx bool, fullTx bool, config *params.ChainConfig, statedb *state.StateDB) map[string]interface{} {
 	fields := RPCMarshalHeader(block.Header())
 	fields["size"] = hexutil.Uint64(block.Size())
 
@@ -1063,7 +1079,11 @@ func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *param
 		}
 		if fullTx {
 			formatTx = func(idx int, tx *types.Transaction) interface{} {
-				return newRPCTransactionFromBlockIndex(block, uint64(idx), config)
+				rpcTx := newRPCTransactionFromBlockIndex(block, uint64(idx), config)
+				if err := applyRPCSubAccountParent(statedb, rpcTx); err != nil {
+					log.Warn("failed to apply sub-account parent to RPC transaction", "tx", tx.Hash(), "err", err)
+				}
+				return rpcTx
 			}
 		}
 		txs := block.Transactions()
@@ -1086,6 +1106,18 @@ func RPCMarshalBlock(block *types.Block, inclTx bool, fullTx bool, config *param
 		fillArbitrumNitroHeaderInfo(block.Header(), fields)
 	}
 	return fields
+}
+
+func applyRPCSubAccountParent(statedb *state.StateDB, tx *RPCTransaction) error {
+	if statedb == nil || tx == nil {
+		return nil
+	}
+	parent, ok, err := core.RPCSubAccountParentHook(statedb, tx.From, tx.To, tx.Input)
+	if err != nil || !ok {
+		return err
+	}
+	tx.From = parent
+	return nil
 }
 
 func fillArbitrumNitroHeaderInfo(header *types.Header, fields map[string]interface{}) {
@@ -1670,7 +1702,14 @@ func (api *TransactionAPI) GetTransactionByHash(ctx context.Context, hash common
 		return nil, err
 	}
 	arbosVersion := types.DeserializeHeaderExtraInformation(header).ArbOSFormatVersion
-	return newRPCTransaction(tx, blockHash, blockNumber, header.Time, index, header.BaseFee, api.b.ChainConfig(), arbosVersion), nil
+	rpcTx := newRPCTransaction(tx, blockHash, blockNumber, header.Time, index, header.BaseFee, api.b.ChainConfig(), arbosVersion)
+	statedb, _, err := api.b.StateAndHeaderByNumberOrHash(ctx, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(blockNumber)))
+	if err == nil {
+		if err := applyRPCSubAccountParent(statedb, rpcTx); err != nil {
+			return nil, err
+		}
+	}
+	return rpcTx, nil
 }
 
 // GetRawTransactionByHash returns the bytes of the transaction for the given hash.
@@ -1720,11 +1759,21 @@ func (api *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash commo
 	if err != nil {
 		return nil, err
 	}
-	return MarshalReceipt(receipt, blockHash, blockNumber, signer, tx, int(index), api.b.ChainConfig(), header, blockMetadata), nil
+	var statedb *state.StateDB
+	if api.b.ChainConfig().IsArbitrum() {
+		statedb = rpcStateByBlockHash(ctx, api.b, blockHash)
+	}
+	return MarshalReceiptWithState(receipt, blockHash, blockNumber, signer, tx, int(index), api.b.ChainConfig(), header, blockMetadata, statedb), nil
 }
 
 // MarshalReceipt marshals a transaction receipt into a JSON object.
 func MarshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int, chainConfig *params.ChainConfig, header *types.Header, blockMetadata common.BlockMetadata) map[string]interface{} {
+	return MarshalReceiptWithState(receipt, blockHash, blockNumber, signer, tx, txIndex, chainConfig, header, blockMetadata, nil)
+}
+
+// MarshalReceiptWithState marshals a transaction receipt into a JSON object with
+// optional block state for DERIW RPC compatibility adjustments.
+func MarshalReceiptWithState(receipt *types.Receipt, blockHash common.Hash, blockNumber uint64, signer types.Signer, tx *types.Transaction, txIndex int, chainConfig *params.ChainConfig, header *types.Header, blockMetadata common.BlockMetadata, statedb *state.StateDB) map[string]interface{} {
 	from, _ := types.Sender(signer, tx)
 
 	fields := map[string]interface{}{
@@ -1780,6 +1829,7 @@ func MarshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 				fields["l1BlockNumber"] = hexutil.Uint64(arbTx.L1BlockNumber)
 			}
 		}
+		applyRPCGaslessEffectiveGasPrice(fields, statedb, from, tx)
 
 		// If blockMetadata exists for the block containing this tx, then we will determine if it was timeboosted or not
 		// and add that info to the receipt object
@@ -1792,6 +1842,26 @@ func MarshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 		}
 	}
 	return fields
+}
+
+func rpcStateByBlockHash(ctx context.Context, b Backend, blockHash common.Hash) *state.StateDB {
+	statedb, _, err := b.StateAndHeaderByNumberOrHash(ctx, rpc.BlockNumberOrHashWithHash(blockHash, false))
+	if err != nil {
+		log.Warn("failed to load block state for RPC receipt compatibility", "blockHash", blockHash, "err", err)
+		return nil
+	}
+	return statedb
+}
+
+func applyRPCGaslessEffectiveGasPrice(fields map[string]interface{}, statedb *state.StateDB, sender common.Address, tx *types.Transaction) {
+	isGasless, err := core.RPCGaslessTxHook(statedb, sender, tx)
+	if err != nil {
+		log.Warn("failed to check gasless tx for RPC receipt compatibility", "txHash", tx.Hash(), "err", err)
+		return
+	}
+	if isGasless {
+		fields["effectiveGasPrice"] = (*hexutil.Big)(new(big.Int))
+	}
 }
 
 // sign is a helper function that signs a transaction with the private key of the given address.

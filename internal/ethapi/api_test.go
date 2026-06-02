@@ -3696,6 +3696,50 @@ func TestRPCGetTransactionReceipt(t *testing.T) {
 	}
 }
 
+func TestMarshalReceiptGaslessEffectiveGasPrice(t *testing.T) {
+	originalHook := core.RPCGaslessTxHook
+	defer func() {
+		core.RPCGaslessTxHook = originalHook
+	}()
+	core.RPCGaslessTxHook = func(statedb *state.StateDB, sender common.Address, tx *types.Transaction) (bool, error) {
+		return true, nil
+	}
+
+	chainConfig := *params.AllEthashProtocolChanges
+	chainConfig.ArbitrumChainParams.EnableArbOS = true
+	chainConfig.ArbitrumChainParams.GenesisBlockNum = 0
+
+	to := common.HexToAddress("0x1000000000000000000000000000000000000000")
+	tx := types.NewTx(&types.LegacyTx{
+		To:       &to,
+		Gas:      params.TxGas,
+		GasPrice: big.NewInt(1_000_000),
+	})
+	receipt := &types.Receipt{
+		Status:            types.ReceiptStatusSuccessful,
+		GasUsed:           params.TxGas,
+		CumulativeGasUsed: params.TxGas,
+		EffectiveGasPrice: big.NewInt(1_000_000),
+	}
+	header := &types.Header{Number: big.NewInt(1), Time: 1}
+
+	result := MarshalReceiptWithState(
+		receipt,
+		common.Hash{1},
+		1,
+		types.HomesteadSigner{},
+		tx,
+		0,
+		&chainConfig,
+		header,
+		nil,
+		nil,
+	)
+	effectiveGasPrice, ok := result["effectiveGasPrice"].(*hexutil.Big)
+	require.True(t, ok)
+	require.Zero(t, (*big.Int)(effectiveGasPrice).Sign())
+}
+
 func TestRPCGetBlockReceipts(t *testing.T) {
 	t.Parallel()
 

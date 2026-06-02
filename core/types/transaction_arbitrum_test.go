@@ -20,10 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math/big"
 	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 )
 
 // Decoder rules for ArbitrumUnsignedTx (0x65) JSON.
@@ -88,6 +92,37 @@ func TestArbitrumUnsignedTxJSONDecode(t *testing.T) {
 				t.Fatalf("hash: got %s, want %s", tx.Hash(), mainnetHash)
 			}
 		})
+	}
+}
+
+func TestLatestSignerArbitrumSupportsSetCodeTx(t *testing.T) {
+	t.Parallel()
+
+	chainConfig := &params.ChainConfig{
+		ChainID:     big.NewInt(42161),
+		LondonBlock: common.Big0,
+		ArbitrumChainParams: params.ArbitrumChainParams{
+			EnableArbOS: true,
+		},
+	}
+	signer := LatestSigner(chainConfig)
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := SignNewTx(key, signer, &SetCodeTx{
+		ChainID:   uint256.MustFromBig(chainConfig.ChainID),
+		GasTipCap: uint256.NewInt(1),
+		GasFeeCap: uint256.NewInt(1),
+		Gas:       250000,
+		To:        common.Address{},
+		Value:     uint256.NewInt(0),
+	})
+	if err != nil {
+		t.Fatalf("sign set-code tx: %v", err)
+	}
+	if _, err := Sender(signer, tx); err != nil {
+		t.Fatalf("recover set-code tx sender: %v", err)
 	}
 }
 

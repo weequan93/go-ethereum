@@ -78,6 +78,9 @@ func MakeSigner(config *params.ChainConfig, blockNumber *big.Int, blockTime uint
 func latestSignerImpl(config *params.ChainConfig) Signer {
 	var signer Signer
 	if config.ChainID != nil {
+		if config.IsArbitrum() {
+			return newModernSigner(config.ChainID, config.LatestFork(0, params.MaxArbosVersionSupported))
+		}
 		switch {
 		case config.PragueTime != nil:
 			signer = NewPragueSigner(config.ChainID)

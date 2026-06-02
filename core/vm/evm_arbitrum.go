@@ -62,6 +62,8 @@ type TxProcessingHook interface {
 	GasPriceOp(evm *EVM) *big.Int
 	FillReceiptInfo(receipt *types.Receipt)
 	MsgIsNonMutating() bool
+	SkipBaseFeeCheck(tx *types.Transaction) bool
+	SubAccountParent(sender common.Address, to *common.Address, data []byte) (common.Address, bool, error)
 	ExecuteWASM(scope *ScopeContext, input []byte, evm *EVM) ([]byte, error)
 	IsCalldataPricingIncreaseEnabled() bool
 }
@@ -112,6 +114,14 @@ func (p DefaultTxProcessor) FillReceiptInfo(*types.Receipt) {}
 
 func (p DefaultTxProcessor) MsgIsNonMutating() bool {
 	return false
+}
+
+func (p DefaultTxProcessor) SkipBaseFeeCheck(_ *types.Transaction) bool {
+	return false
+}
+
+func (p DefaultTxProcessor) SubAccountParent(_ common.Address, _ *common.Address, _ []byte) (common.Address, bool, error) {
+	return common.Address{}, false, nil
 }
 
 func (p DefaultTxProcessor) ExecuteWASM(_ *ScopeContext, _ []byte, evm *EVM) ([]byte, error) {

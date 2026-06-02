@@ -48,6 +48,18 @@ var GetArbOSSpeedLimitPerSecond func(statedb *state.StateDB) (uint64, error)
 // While processing RPC only - Ask ArbOS what are the poster costs for this message.
 var RPCPostingGasHook = func(msg *Message, header *types.Header, statedb *state.StateDB) (uint64, error) { return 0, nil }
 
+// While processing RPC only - Ask ArbOS whether a sender should be shown as its
+// controlling sub-account parent for compatibility with DERIW RPC responses.
+var RPCSubAccountParentHook = func(statedb *state.StateDB, sender common.Address, to *common.Address, data []byte) (common.Address, bool, error) {
+	return common.Address{}, false, nil
+}
+
+// While processing RPC only - Ask ArbOS whether a tx should be shown as
+// zero-priced for compatibility with DERIW gasless/custom-pricer responses.
+var RPCGaslessTxHook = func(statedb *state.StateDB, sender common.Address, tx *types.Transaction) (bool, error) {
+	return false, nil
+}
+
 // Renders a solidity error in human-readable form
 var RenderRPCError func(data []byte) error
 
