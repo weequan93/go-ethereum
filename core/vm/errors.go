@@ -38,6 +38,7 @@ var (
 	ErrGasUintOverflow          = errors.New("gas uint64 overflow")
 	ErrInvalidCode              = errors.New("invalid code: must not begin with 0xef")
 	ErrNonceUintOverflow        = errors.New("nonce uint64 overflow")
+	ErrDeriwBlacklisted         = errors.New("DeriwOS blacklist violation")
 
 	// errStopToken is an internal token indicating interpreter loop termination,
 	// never returned to outside callers.
@@ -147,6 +148,7 @@ const (
 	VMErrorCodeStackUnderflow
 	VMErrorCodeStackOverflow
 	VMErrorCodeInvalidOpCode
+	VMErrorCodeDeriwBlacklisted
 
 	// VMErrorCodeUnknown explicitly marks an error as unknown, this is useful when error is converted
 	// from an actual `error` in which case if the mapping is not known, we can use this value to indicate that.
@@ -181,6 +183,8 @@ func vmErrorCodeFromErr(err error) int {
 		return VMErrorCodeInvalidCode
 	case errors.Is(err, ErrNonceUintOverflow):
 		return VMErrorCodeNonceUintOverflow
+	case errors.Is(err, ErrDeriwBlacklisted):
+		return VMErrorCodeDeriwBlacklisted
 
 	default:
 		// Dynamic errors

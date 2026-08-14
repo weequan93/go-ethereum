@@ -804,15 +804,25 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		}
 	}
 
-	// Refund the gas that was held to limit the amount of computation done.
-	st.gasRemaining += st.calcHeldGasRefund()
+	// Refund gas held to cap ordinary execution. A DeriwOS failed no-op consumes
+	// the full supplied limit, including gas that was never made available to the
+	// EVM because of the per-transaction execution cap.
+	heldGas := st.calcHeldGasRefund()
+	if vmerr == vm.ErrDeriwBlacklisted {
+		usedMultiGas = usedMultiGas.SaturatingIncrement(multigas.ResourceKindComputation, heldGas)
+	} else {
+		st.gasRemaining += heldGas
+	}
 
 	// Record the gas used excluding gas refunds. This value represents the actual
 	// gas allowance required to complete execution.
 	peakGasUsed := st.gasUsed()
 
 	// Compute refund counter, capped to a refund quotient.
-	refund := st.calcRefund()
+	refund := uint64(0)
+	if vmerr != vm.ErrDeriwBlacklisted {
+		refund = st.calcRefund()
+	}
 	st.gasRemaining += refund
 	// Arbitrum: set the multigas refunds
 	usedMultiGas = usedMultiGas.WithRefund(refund)
