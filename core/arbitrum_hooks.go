@@ -60,6 +60,12 @@ var RPCGaslessTxHook = func(statedb *state.StateDB, sender common.Address, tx *t
 	return false, nil
 }
 
+// While processing eth_estimateGas only - Ask ArbOS whether the transaction
+// target is gasless allowlisted and should therefore be simulated with zero fees.
+var RPCGaslessEstimateGasHook = func(statedb *state.StateDB, to *common.Address) (bool, error) {
+	return false, nil
+}
+
 // Renders a solidity error in human-readable form
 var RenderRPCError func(data []byte) error
 

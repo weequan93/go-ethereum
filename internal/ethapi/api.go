@@ -956,6 +956,19 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 	}
 	header = updateHeaderForPendingBlocks(blockNrOrHash, header)
 
+	// Gasless allowlisted targets do not charge the sender. Wallets commonly
+	// include non-zero fee fields anyway, which would make the estimator cap the
+	// simulation by the sender's native balance before executing the call.
+	gasless, err := core.RPCGaslessEstimateGasHook(state, args.To)
+	if err != nil {
+		return 0, err
+	}
+	if gasless {
+		args.GasPrice = (*hexutil.Big)(common.Big0)
+		args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
+		args.MaxPriorityFeePerGas = (*hexutil.Big)(common.Big0)
+	}
+
 	// Construct the gas estimator option from the user input
 	opts := &gasestimator.Options{
 		Config:           b.ChainConfig(),

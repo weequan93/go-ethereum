@@ -773,6 +773,78 @@ func (b testBackend) HistoryPruningCutoff() uint64 {
 	return bn
 }
 
+func TestEstimateGasGaslessFeeNormalization(t *testing.T) {
+	originalHook := core.RPCGaslessEstimateGasHook
+	defer func() {
+		core.RPCGaslessEstimateGasHook = originalHook
+	}()
+
+	allowlisted := common.HexToAddress("0x1000000000000000000000000000000000000000")
+	notAllowlisted := common.HexToAddress("0x2000000000000000000000000000000000000000")
+	sender := common.HexToAddress("0x3000000000000000000000000000000000000000")
+	core.RPCGaslessEstimateGasHook = func(statedb *state.StateDB, to *common.Address) (bool, error) {
+		return statedb != nil && to != nil && *to == allowlisted, nil
+	}
+
+	genesis := &core.Genesis{
+		Config: params.MergedTestChainConfig,
+		Alloc:  types.GenesisAlloc{},
+	}
+	backend := newTestBackend(t, 0, genesis, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {})
+	block := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+	one := func() *hexutil.Big {
+		return (*hexutil.Big)(big.NewInt(1))
+	}
+
+	_, err := DoEstimateGas(context.Background(), backend, TransactionArgs{
+		From:     &sender,
+		To:       &notAllowlisted,
+		GasPrice: one(),
+	}, block, nil, nil, backend.RPCGasCap())
+	if !errors.Is(err, core.ErrInsufficientFundsForTransfer) {
+		t.Fatalf("non-allowlisted estimate error mismatch: want %v, have %v", core.ErrInsufficientFundsForTransfer, err)
+	}
+
+	tests := []struct {
+		name string
+		args TransactionArgs
+	}{
+		{
+			name: "gasPrice",
+			args: TransactionArgs{GasPrice: one()},
+		},
+		{
+			name: "maxFeePerGas",
+			args: TransactionArgs{MaxFeePerGas: one()},
+		},
+		{
+			name: "maxPriorityFeePerGas",
+			args: TransactionArgs{MaxPriorityFeePerGas: one()},
+		},
+		{
+			name: "all fee fields",
+			args: TransactionArgs{
+				GasPrice:             one(),
+				MaxFeePerGas:         one(),
+				MaxPriorityFeePerGas: one(),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.args.From = &sender
+			test.args.To = &allowlisted
+			estimate, err := DoEstimateGas(context.Background(), backend, test.args, block, nil, nil, backend.RPCGasCap())
+			if err != nil {
+				t.Fatalf("gasless estimate failed: %v", err)
+			}
+			if uint64(estimate) != params.TxGas {
+				t.Fatalf("gasless estimate mismatch: want %d, have %d", params.TxGas, estimate)
+			}
+		})
+	}
+}
+
 func TestEstimateGas(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
