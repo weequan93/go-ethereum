@@ -964,9 +964,10 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		return 0, err
 	}
 	if gasless {
-		args.GasPrice = (*hexutil.Big)(common.Big0)
-		args.MaxFeePerGas = (*hexutil.Big)(common.Big0)
-		args.MaxPriorityFeePerGas = (*hexutil.Big)(common.Big0)
+		zero := new(hexutil.Big)
+		args.GasPrice = zero
+		args.MaxFeePerGas = zero
+		args.MaxPriorityFeePerGas = zero
 	}
 
 	// Construct the gas estimator option from the user input

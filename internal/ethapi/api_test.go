@@ -795,6 +795,9 @@ func TestEstimateGasGaslessFeeNormalization(t *testing.T) {
 	one := func() *hexutil.Big {
 		return (*hexutil.Big)(big.NewInt(1))
 	}
+	zero := func() *hexutil.Big {
+		return new(hexutil.Big)
+	}
 
 	_, err := DoEstimateGas(context.Background(), backend, TransactionArgs{
 		From:     &sender,
@@ -804,22 +807,40 @@ func TestEstimateGasGaslessFeeNormalization(t *testing.T) {
 	if !errors.Is(err, core.ErrInsufficientFundsForTransfer) {
 		t.Fatalf("non-allowlisted estimate error mismatch: want %v, have %v", core.ErrInsufficientFundsForTransfer, err)
 	}
+	baseline, err := DoEstimateGas(context.Background(), backend, TransactionArgs{
+		From: &sender,
+		To:   &allowlisted,
+	}, block, nil, nil, backend.RPCGasCap())
+	if err != nil {
+		t.Fatalf("gasless estimate with omitted fee fields failed: %v", err)
+	}
 
 	tests := []struct {
 		name string
 		args TransactionArgs
 	}{
 		{
-			name: "gasPrice",
+			name: "zero gasPrice",
+			args: TransactionArgs{GasPrice: zero()},
+		},
+		{
+			name: "non-zero gasPrice",
 			args: TransactionArgs{GasPrice: one()},
 		},
 		{
-			name: "maxFeePerGas",
+			name: "non-zero maxFeePerGas",
 			args: TransactionArgs{MaxFeePerGas: one()},
 		},
 		{
-			name: "maxPriorityFeePerGas",
+			name: "non-zero maxPriorityFeePerGas",
 			args: TransactionArgs{MaxPriorityFeePerGas: one()},
+		},
+		{
+			name: "non-zero EIP-1559 fee fields",
+			args: TransactionArgs{
+				MaxFeePerGas:         one(),
+				MaxPriorityFeePerGas: one(),
+			},
 		},
 		{
 			name: "all fee fields",
@@ -838,8 +859,8 @@ func TestEstimateGasGaslessFeeNormalization(t *testing.T) {
 			if err != nil {
 				t.Fatalf("gasless estimate failed: %v", err)
 			}
-			if uint64(estimate) != params.TxGas {
-				t.Fatalf("gasless estimate mismatch: want %d, have %d", params.TxGas, estimate)
+			if estimate != baseline {
+				t.Fatalf("gasless estimate mismatch: want %d, have %d", baseline, estimate)
 			}
 		})
 	}
