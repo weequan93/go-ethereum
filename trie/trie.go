@@ -162,6 +162,21 @@ func (t *Trie) NodeIteratorWithRange(start, end []byte) (NodeIterator, error) {
 	return newSubtreeIterator(t, start, end)
 }
 
+// NodeIteratorWithRangeHashFirst is like NodeIteratorWithRange, but exposes
+// hashed child references before loading their contents. Hash and Path can be
+// compared with another trie and Next(false) skips an equal subtree without a
+// read. Next(true) resolves the current reference and reports any read error.
+// Initial seeking remains eager. Skipped subtrees are NOT checked for missing
+// nodes: this is a diff optimization for trusted roots, not a state verifier.
+// Existing iterator methods retain their meaning; a hashed reference is not a
+// leaf (the value node is reached only after descending into it).
+func (t *Trie) NodeIteratorWithRangeHashFirst(start, end []byte) (NodeIterator, error) {
+	if t.committed {
+		return nil, ErrCommitted
+	}
+	return newSubtreeIteratorMode(t, start, end, true)
+}
+
 // MustGet is a wrapper of Get and will omit any encountered error but just
 // print out an error message.
 func (t *Trie) MustGet(key []byte) []byte {

@@ -144,8 +144,9 @@ type nodeIterator struct {
 	path  []byte               // Path to the current node
 	err   error                // Failure set in case of an internal error in the iterator
 
-	resolver NodeResolver         // optional node resolver for avoiding disk hits
-	pool     []*nodeIteratorState // local pool for iterator states
+	resolver  NodeResolver         // optional node resolver for avoiding disk hits
+	pool      []*nodeIteratorState // local pool for iterator states
+	hashFirst bool                 // expose hash references before resolving them on descent
 }
 
 // errIteratorEnd is stored in nodeIterator.err when iteration is done.
@@ -343,12 +344,23 @@ func (it *nodeIterator) peek(descend bool) (*nodeIteratorState, *int, []byte, er
 	// Continue iteration to the next child
 	for len(it.stack) > 0 {
 		parent := it.stack[len(it.stack)-1]
+		// A hash-first iterator may have exposed this node without loading it.
+		// Resolve only when descending; Next(false) has already popped it.
+		if it.hashFirst {
+			if err := parent.resolve(it, it.path); err != nil {
+				return nil, nil, nil, err
+			}
+		}
 		ancestor := parent.hash
 		if (ancestor == common.Hash{}) {
 			ancestor = parent.parent
 		}
 		state, path, ok := it.nextChild(parent, ancestor)
 		if ok {
+			if hash, unresolved := state.node.(hashNode); it.hashFirst && unresolved {
+				state.hash = common.BytesToHash(hash)
+				return state, &parent.index, path, nil
+			}
 			if err := state.resolve(it, path); err != nil {
 				return parent, &parent.index, path, err
 			}
@@ -857,10 +869,16 @@ type subtreeIterator struct {
 // If startKey is nil, iteration starts from the beginning. If stopKey is nil,
 // iteration continues to the end of the trie.
 func newSubtreeIterator(trie *Trie, startKey, stopKey []byte) (NodeIterator, error) {
+	return newSubtreeIteratorMode(trie, startKey, stopKey, false)
+}
+
+func newSubtreeIteratorMode(trie *Trie, startKey, stopKey []byte, hashFirst bool) (NodeIterator, error) {
 	it, err := trie.NodeIterator(startKey)
 	if err != nil {
 		return nil, err
 	}
+	// Initial seeking stays eager so range boundary semantics are unchanged.
+	it.(*nodeIterator).hashFirst = hashFirst
 	if startKey == nil && stopKey == nil {
 		return it, nil
 	}
