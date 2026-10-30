@@ -338,7 +338,7 @@ func TestIndexerCompareDb(t *testing.T) {
 }
 
 type testSetup struct {
-	t                    *testing.T
+	t                    testing.TB
 	fm                   *FilterMaps
 	db                   ethdb.Database
 	chain                *testChain
@@ -347,7 +347,7 @@ type testSetup struct {
 	testDisableSnapshots bool
 }
 
-func newTestSetup(t *testing.T) *testSetup {
+func newTestSetup(t testing.TB) *testSetup {
 	params := testParams
 	params.deriveFields()
 	ts := &testSetup{

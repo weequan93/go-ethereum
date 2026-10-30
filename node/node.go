@@ -404,9 +404,11 @@ func (n *Node) startRPC() error {
 	)
 
 	rpcConfig := rpcEndpointConfig{
-		batchItemLimit:         n.config.BatchRequestLimit,
-		batchResponseSizeLimit: n.config.BatchResponseMaxSize,
-		apiFilter:              n.apiFilter,
+		batchItemLimit:            n.config.BatchRequestLimit,
+		batchResponseSizeLimit:    n.config.BatchResponseMaxSize,
+		slowCallThreshold:         n.config.RPCSlowCallThreshold,
+		stageDiagnosticsThreshold: n.config.RPCStageDiagnosticsThreshold,
+		apiFilter:                 n.apiFilter,
 	}
 	if n.config.HTTPBodyLimit != 0 {
 		rpcConfig.httpBodyLimit = n.config.HTTPBodyLimit
@@ -752,9 +754,10 @@ func (n *Node) OpenDatabaseWithOptions(name string, opt DatabaseOptions) (ethdb.
 	var db ethdb.Database
 	var err error
 	if n.config.DataDir == "" {
-		db, _ = rawdb.Open(memorydb.New(), rawdb.OpenOptions{
-			MetricsNamespace: opt.MetricsNamespace,
-			ReadOnly:         opt.ReadOnly,
+		db, err = rawdb.Open(memorydb.New(), rawdb.OpenOptions{
+			MetricsNamespace:      opt.MetricsNamespace,
+			ReadOnly:              opt.ReadOnly,
+			FreezerMaxBatchBlocks: opt.FreezerMaxBatchBlocks,
 		})
 	} else {
 		opt.AncientsDirectory = n.ResolveAncient(name, opt.AncientsDirectory)

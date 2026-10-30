@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -103,10 +104,12 @@ type logCacheElem struct {
 // cachedLogElem loads block logs from the backend and caches the result.
 func (sys *FilterSystem) cachedLogElem(ctx context.Context, blockHash common.Hash, number, time uint64) (*logCacheElem, error) {
 	cached, ok := sys.logsCache.Get(blockHash)
+	trace := rpcdiag.FromContext(ctx)
 	if ok {
+		trace.Add(rpcdiag.LogCacheHits, 1)
 		return cached, nil
 	}
-
+	trace.Add(rpcdiag.LogCacheMisses, 1)
 	logs, err := sys.backend.GetLogs(ctx, blockHash, number)
 	if err != nil {
 		return nil, err
@@ -135,9 +138,12 @@ func (sys *FilterSystem) cachedLogElem(ctx context.Context, blockHash common.Has
 }
 
 func (sys *FilterSystem) cachedGetBody(ctx context.Context, elem *logCacheElem, hash common.Hash, number uint64) (*types.Body, error) {
+	trace := rpcdiag.FromContext(ctx)
 	if body := elem.body.Load(); body != nil {
+		trace.Add(rpcdiag.BodyCacheHits, 1)
 		return body, nil
 	}
+	trace.Add(rpcdiag.BodyCacheMisses, 1)
 	body, err := sys.backend.GetBody(ctx, hash, rpc.BlockNumber(number))
 	if err != nil {
 		return nil, err

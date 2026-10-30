@@ -202,6 +202,7 @@ func (s *Server) Stop() {
 
 	if s.run.CompareAndSwap(true, false) {
 		log.Debug("RPC server shutting down")
+		s.services.stopStageDiagnostics()
 		for codec := range s.codecs {
 			codec.close()
 		}

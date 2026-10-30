@@ -21,6 +21,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 )
 
 // FilterMapsMatcherBackend implements MatcherBackend.
@@ -75,6 +76,9 @@ func (fm *FilterMapsMatcherBackend) Close() {
 // on write.
 // GetFilterMapRows implements MatcherBackend.
 func (fm *FilterMapsMatcherBackend) GetFilterMapRows(ctx context.Context, mapIndices []uint32, rowIndex uint32, baseLayerOnly bool) ([]FilterRow, error) {
+	trace := rpcdiag.FromContext(ctx)
+	started := trace.Start()
+	defer trace.End(rpcdiag.FilterRowsRead, started)
 	return fm.f.getFilterMapRows(mapIndices, rowIndex, baseLayerOnly)
 }
 
@@ -85,8 +89,11 @@ func (fm *FilterMapsMatcherBackend) GetFilterMapRows(ctx context.Context, mapInd
 // valid range is correct.
 // GetBlockLvPointer implements MatcherBackend.
 func (fm *FilterMapsMatcherBackend) GetBlockLvPointer(ctx context.Context, blockNumber uint64) (uint64, error) {
-	fm.f.indexLock.RLock()
-	defer fm.f.indexLock.RUnlock()
+	trace := rpcdiag.FromContext(ctx)
+	hold := trace.RLock(&fm.f.indexLock)
+	defer trace.RUnlock(&fm.f.indexLock, hold)
+	started := trace.Start()
+	defer trace.End(rpcdiag.BlockPointerRead, started)
 
 	if blockNumber >= fm.f.indexedRange.blocks.AfterLast() {
 		if fm.f.indexedRange.headIndexed {
@@ -112,10 +119,28 @@ func (fm *FilterMapsMatcherBackend) GetBlockLvPointer(ctx context.Context, block
 // using SyncLogIndex and re-process certain blocks if necessary.
 // GetLogByLvIndex implements MatcherBackend.
 func (fm *FilterMapsMatcherBackend) GetLogByLvIndex(ctx context.Context, lvIndex uint64) (*types.Log, error) {
+	trace := rpcdiag.FromContext(ctx)
+	if trace == nil {
+		fm.f.indexLock.RLock()
+		defer fm.f.indexLock.RUnlock()
+		return fm.f.getLogByLvIndex(lvIndex)
+	}
+	return fm.getLogByLvIndexObserved(lvIndex, nil, trace)
+}
+
+// getLogByLvIndexCached uses scan state owned exclusively by a candidate batch.
+// Unlike backend-wide state, this needs no extra lock or matcher allocation.
+func (fm *FilterMapsMatcherBackend) getLogByLvIndexCached(lvIndex uint64, cache *logLookupCache) (*types.Log, error) {
 	fm.f.indexLock.RLock()
 	defer fm.f.indexLock.RUnlock()
 
-	return fm.f.getLogByLvIndex(lvIndex)
+	return fm.f.getLogByLvIndexCached(lvIndex, cache)
+}
+
+func (fm *FilterMapsMatcherBackend) getLogByLvIndexObserved(lvIndex uint64, cache *logLookupCache, trace *rpcdiag.Trace) (*types.Log, error) {
+	hold := trace.RLock(&fm.f.indexLock)
+	defer trace.RUnlock(&fm.f.indexLock, hold)
+	return fm.f.getLogByLvIndexObserved(lvIndex, cache, trace)
 }
 
 // synced signals to the matcher that has triggered a synchronisation that it
@@ -154,26 +179,37 @@ func (fm *FilterMapsMatcherBackend) synced() {
 // range that has not been changed and has been consistent with all states of the
 // chain since the previous SyncLogIndex or the creation of the matcher backend.
 func (fm *FilterMapsMatcherBackend) SyncLogIndex(ctx context.Context) (SyncRange, error) {
+	trace := rpcdiag.FromContext(ctx)
 	syncCh := make(chan SyncRange, 1)
+	registered := trace.Start()
 	fm.f.matchersLock.Lock()
+	trace.End(rpcdiag.SyncRegisterWait, registered)
 	fm.syncCh = syncCh
 	fm.f.matchersLock.Unlock()
 
+	enqueued := trace.Start()
 	select {
 	case fm.f.matcherSyncCh <- fm:
+		trace.End(rpcdiag.SyncEnqueueWait, enqueued)
 	case <-ctx.Done():
+		trace.End(rpcdiag.SyncEnqueueWait, enqueued)
 		return SyncRange{}, ctx.Err()
 	case <-fm.f.disabledCh:
+		trace.End(rpcdiag.SyncEnqueueWait, enqueued)
 		// Note: acquiring the indexLock read lock is unnecessary here,
 		// as the indexer has already been terminated.
 		return SyncRange{IndexedView: fm.f.indexedView}, nil
 	}
+	responded := trace.Start()
 	select {
 	case vr := <-syncCh:
+		trace.End(rpcdiag.SyncResponseWait, responded)
 		return vr, nil
 	case <-ctx.Done():
+		trace.End(rpcdiag.SyncResponseWait, responded)
 		return SyncRange{}, ctx.Err()
 	case <-fm.f.disabledCh:
+		trace.End(rpcdiag.SyncResponseWait, responded)
 		// Note: acquiring the indexLock read lock is unnecessary here,
 		// as the indexer has already been terminated.
 		return SyncRange{IndexedView: fm.f.indexedView}, nil

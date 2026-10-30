@@ -97,7 +97,8 @@ type SimulatedBeacon struct {
 	curForkchoiceState engine.ForkchoiceStateV1
 	lastBlockTime      uint64
 
-	blobsBundleProvider map[common.Hash]*engine.BlobsBundle
+	blobsBundleProviderMu sync.RWMutex
+	blobsBundleProvider   map[common.Hash]*engine.BlobsBundle
 }
 
 func payloadVersion(config *params.ChainConfig, time uint64, header *types.Header) engine.PayloadVersion {
@@ -273,8 +274,12 @@ func (c *SimulatedBeacon) sealBlock(withdrawals []*types.Withdrawal, timestamp u
 	}
 	c.lastBlockTime = payload.Timestamp
 
-	if c.blobsBundleProvider != nil && envelope.BlobsBundle != nil {
-		c.blobsBundleProvider[payload.BlockHash] = envelope.BlobsBundle
+	if envelope.BlobsBundle != nil {
+		c.blobsBundleProviderMu.Lock()
+		if c.blobsBundleProvider != nil {
+			c.blobsBundleProvider[payload.BlockHash] = envelope.BlobsBundle
+		}
+		c.blobsBundleProviderMu.Unlock()
 	}
 	return nil
 }

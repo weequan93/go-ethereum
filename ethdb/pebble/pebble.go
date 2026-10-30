@@ -32,6 +32,7 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -138,7 +139,8 @@ type Database struct {
 	writeDelayCount     atomic.Int64 // Total number of write stall counts
 	writeDelayTime      atomic.Int64 // Total time spent in write stalls
 
-	writeOptions *pebble.WriteOptions
+	writeOptions     *pebble.WriteOptions
+	compactionPacing *compactionPacingFS
 }
 
 func (d *Database) onCompactionBegin(info pebble.CompactionInfo) {
@@ -164,6 +166,9 @@ func (d *Database) onCompactionEnd(info pebble.CompactionInfo) {
 }
 
 func (d *Database) onWriteStallBegin(b pebble.WriteStallBeginInfo) {
+	if d.compactionPacing != nil {
+		d.compactionPacing.setWriteStalled(true)
+	}
 	d.writeDelayStartTime = time.Now()
 	d.writeDelayCount.Add(1)
 	d.writeStalled.Store(true)
@@ -183,6 +188,9 @@ func (d *Database) onWriteStallBegin(b pebble.WriteStallBeginInfo) {
 }
 
 func (d *Database) onWriteStallEnd() {
+	if d.compactionPacing != nil {
+		d.compactionPacing.setWriteStalled(false)
+	}
 	d.writeDelayTime.Add(int64(time.Since(d.writeDelayStartTime)))
 	d.writeStalled.Store(false)
 
@@ -213,6 +221,9 @@ func (l panicLogger) Fatalf(format string, args ...interface{}) {
 func New(file string, cache int, handles int, namespace string, readonly bool, extraOptions *ExtraOptions) (*Database, error) {
 	if extraOptions == nil {
 		extraOptions = &ExtraOptions{}
+	}
+	if extraOptions.CompactionOutputBytesPerSecond < 0 {
+		return nil, fmt.Errorf("compaction output bytes per second must be non-negative")
 	}
 	if extraOptions.MemTableStopWritesThreshold <= 0 {
 		extraOptions.MemTableStopWritesThreshold = 4
@@ -345,10 +356,18 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt.Experimental.ReadCompactionRate = extraOptions.Experimental.ReadCompactionRate
 	opt.Experimental.MaxWriterConcurrency = extraOptions.Experimental.MaxWriterConcurrency
 	opt.Experimental.ForceWriterParallelism = extraOptions.Experimental.ForceWriterParallelism
+	if extraOptions.CompactionOutputBytesPerSecond > 0 && !readonly {
+		db.compactionPacing = newCompactionPacingFS(vfs.Default, extraOptions.CompactionOutputBytesPerSecond, namespace)
+		opt.FS = db.compactionPacing
+		opt.EventListener.TableCreated = db.compactionPacing.markCompaction
+	}
 
 	// Open the db and recover any potential corruptions
 	innerDB, err := pebble.Open(file, opt)
 	if err != nil {
+		if db.compactionPacing != nil {
+			db.compactionPacing.stop()
+		}
 		return nil, err
 	}
 	db.db = innerDB
@@ -400,6 +419,11 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 // Close stops the metrics collection, flushes any pending data to disk and closes
 // all io accesses to the underlying key-value store.
 func (d *Database) Close() error {
+	// Release pacing before waiting for foreground operations holding quitLock.
+	// Pebble still completes/syncs all writes through its normal Close path.
+	if d.compactionPacing != nil {
+		d.compactionPacing.stop()
+	}
 	d.quitLock.Lock()
 	defer d.quitLock.Unlock()
 	// Allow double closing, simplifies things

@@ -3,21 +3,22 @@ package pebble
 import "time"
 
 type ExtraOptions struct {
-	SyncMode                    bool
-	BytesPerSync                int
-	L0CompactionFileThreshold   int
-	L0CompactionThreshold       int
-	L0StopWritesThreshold       int
-	LBaseMaxBytes               int64
-	MemTableStopWritesThreshold int
-	MaxConcurrentCompactions    func() int
-	DisableAutomaticCompactions bool
-	WALBytesPerSync             int
-	WALDir                      string
-	WALMinSyncInterval          func() time.Duration
-	TargetByteDeletionRate      int
-	Experimental                ExtraOptionsExperimental
-	Levels                      []ExtraLevelOptions
+	SyncMode                       bool
+	BytesPerSync                   int
+	L0CompactionFileThreshold      int
+	L0CompactionThreshold          int
+	L0StopWritesThreshold          int
+	LBaseMaxBytes                  int64
+	MemTableStopWritesThreshold    int
+	MaxConcurrentCompactions       func() int
+	CompactionOutputBytesPerSecond int64
+	DisableAutomaticCompactions    bool
+	WALBytesPerSync                int
+	WALDir                         string
+	WALMinSyncInterval             func() time.Duration
+	TargetByteDeletionRate         int
+	Experimental                   ExtraOptionsExperimental
+	Levels                         []ExtraLevelOptions
 }
 
 type ExtraOptionsExperimental struct {

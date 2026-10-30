@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -77,9 +78,21 @@ func newFilter(sys *FilterSystem, addresses []common.Address, topics [][]common.
 // Logs searches the blockchain for matching log entries, returning all from the
 // first block that contains matches, updating the start of the filter accordingly.
 func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
+	trace := rpcdiag.FromContext(ctx)
+	resolveStarted := trace.Start()
+	resolved := false
+	if trace != nil {
+		defer func() {
+			if !resolved {
+				trace.End(rpcdiag.Resolve, resolveStarted)
+			}
+		}()
+	}
 	// If we're doing singleton block filtering, execute and return
 	if f.block != nil {
+		headerStarted := trace.Start()
 		header, err := f.sys.backend.HeaderByHash(ctx, *f.block)
+		trace.End(rpcdiag.HeaderRead, headerStarted)
 		if err != nil {
 			return nil, err
 		}
@@ -89,6 +102,9 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 		if header.Number.Uint64() < f.sys.backend.HistoryPruningCutoff() {
 			return nil, &history.PrunedHistoryError{}
 		}
+		trace.Max(rpcdiag.ResolvedBlocks, 1)
+		trace.End(rpcdiag.Resolve, resolveStarted)
+		resolved = true
 		return f.blockLogs(ctx, header)
 	}
 
@@ -106,20 +122,26 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 			// even if the chain is updated during search.
 			return math.MaxUint64, nil
 		case rpc.FinalizedBlockNumber.Int64():
+			headerStarted := trace.Start()
 			hdr, _ := f.sys.backend.HeaderByNumber(ctx, rpc.FinalizedBlockNumber)
+			trace.End(rpcdiag.HeaderRead, headerStarted)
 			if hdr == nil {
 				return 0, errors.New("finalized header not found")
 			}
 			return hdr.Number.Uint64(), nil
 		case rpc.SafeBlockNumber.Int64():
+			headerStarted := trace.Start()
 			hdr, _ := f.sys.backend.HeaderByNumber(ctx, rpc.SafeBlockNumber)
+			trace.End(rpcdiag.HeaderRead, headerStarted)
 			if hdr == nil {
 				return 0, errors.New("safe header not found")
 			}
 			return hdr.Number.Uint64(), nil
 		case rpc.EarliestBlockNumber.Int64():
 			earliest := f.sys.backend.HistoryPruningCutoff()
+			headerStarted := trace.Start()
 			hdr, _ := f.sys.backend.HeaderByNumber(ctx, rpc.BlockNumber(earliest))
+			trace.End(rpcdiag.HeaderRead, headerStarted)
 			if hdr == nil {
 				return 0, errors.New("earliest header not found")
 			}
@@ -141,6 +163,8 @@ func (f *Filter) Logs(ctx context.Context) ([]*types.Log, error) {
 	if err != nil {
 		return nil, err
 	}
+	trace.End(rpcdiag.Resolve, resolveStarted)
+	resolved = true
 	return f.rangeLogs(ctx, begin, end)
 }
 
@@ -186,7 +210,10 @@ func newSearchSession(ctx context.Context, filter *Filter, mb filtermaps.Matcher
 	// enforce a consistent state before starting the search in order to be able
 	// to determine valid range later
 	var err error
+	trace := rpcdiag.FromContext(ctx)
+	syncStarted := trace.Start()
 	s.syncRange, err = s.mb.SyncLogIndex(s.ctx)
+	trace.End(rpcdiag.SyncInitial, syncStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +229,9 @@ func newSearchSession(ctx context.Context, filter *Filter, mb filtermaps.Matcher
 // If the session already had an existing chain view and set of matches then
 // it also trims part of the match set that a chain reorg might have invalidated.
 func (s *searchSession) updateChainView() error {
+	trace := rpcdiag.FromContext(s.ctx)
+	started := trace.Start()
+	defer trace.End(rpcdiag.Consistency, started)
 	// update chain view based on current chain head (might be more recent than
 	// the indexed view of syncRange as the indexer updates it asynchronously
 	// with some delay
@@ -223,6 +253,7 @@ func (s *searchSession) updateChainView() error {
 		return errInvalidBlockRange
 	}
 	s.searchRange = common.NewRange(firstBlock, lastBlock+1-firstBlock)
+	trace.Max(rpcdiag.ResolvedBlocks, int64(s.searchRange.Count()))
 
 	// Trim existing match set in case a reorg may have invalidated some results
 	if !s.matchRange.IsEmpty() {
@@ -254,6 +285,10 @@ func (s *searchSession) trimMatches(trimRange, matchRange common.Range[uint64], 
 
 // searchInRange performs a single range search, either indexed or unindexed.
 func (s *searchSession) searchInRange(r common.Range[uint64], indexed bool) (common.Range[uint64], []*types.Log, error) {
+	trace := rpcdiag.FromContext(s.ctx)
+	if indexed {
+		trace.Add(rpcdiag.IndexedBlockVisits, int64(r.Count()))
+	}
 	if indexed {
 		if s.filter.rangeLogsTestHook != nil {
 			s.filter.rangeLogsTestHook <- rangeLogsTestEvent{rangeLogsTestIndexed, r}
@@ -268,7 +303,10 @@ func (s *searchSession) searchInRange(r common.Range[uint64], indexed bool) (com
 				s.filter.rangeLogsTestHook <- rangeLogsTestEvent{rangeLogsTestSync, common.Range[uint64]{}}
 			}
 			var syncErr error
-			if s.syncRange, syncErr = s.mb.SyncLogIndex(s.ctx); syncErr != nil {
+			syncStarted := trace.Start()
+			s.syncRange, syncErr = s.mb.SyncLogIndex(s.ctx)
+			trace.End(rpcdiag.SyncPost, syncStarted)
+			if syncErr != nil {
 				return common.Range[uint64]{}, nil, syncErr
 			}
 			if s.filter.rangeLogsTestHook != nil {
@@ -381,8 +419,15 @@ func (f *Filter) rangeLogs(ctx context.Context, firstBlock, lastBlock uint64) ([
 	if firstBlock > lastBlock {
 		return nil, nil
 	}
+	trace := rpcdiag.FromContext(ctx)
+	setupStarted := trace.Start()
 	mb := f.sys.backend.NewMatcherBackend()
-	defer mb.Close()
+	trace.End(rpcdiag.BackendSetup, setupStarted)
+	defer func() {
+		started := trace.Start()
+		mb.Close()
+		trace.End(rpcdiag.BackendClose, started)
+	}()
 
 	session, err := newSearchSession(ctx, f, mb, firstBlock, lastBlock)
 	if err != nil {
@@ -407,9 +452,15 @@ func (f *Filter) rangeLogs(ctx context.Context, firstBlock, lastBlock uint64) ([
 }
 
 func (f *Filter) indexedLogs(ctx context.Context, mb filtermaps.MatcherBackend, begin, end uint64) ([]*types.Log, error) {
+	trace := rpcdiag.FromContext(ctx)
+	diagnosticStarted := trace.Start()
+	defer trace.End(rpcdiag.IndexedSearch, diagnosticStarted)
 	start := time.Now()
 	potentialMatches, err := filtermaps.GetPotentialMatches(ctx, mb, begin, end, f.addresses, f.topics)
+	trace.Add(rpcdiag.Candidates, int64(len(potentialMatches)))
+	filterStarted := trace.Start()
 	matches := types.FilterLogs(potentialMatches, nil, nil, f.addresses, f.topics)
+	trace.End(rpcdiag.ResultFilter, filterStarted)
 	log.Trace("Performed indexed log search", "begin", begin, "end", end, "true matches", len(matches), "false positives", len(potentialMatches)-len(matches), "elapsed", common.PrettyDuration(time.Since(start)))
 	return matches, err
 }
@@ -417,6 +468,9 @@ func (f *Filter) indexedLogs(ctx context.Context, mb filtermaps.MatcherBackend, 
 // unindexedLogs returns the logs matching the filter criteria based on raw block
 // iteration and bloom matching.
 func (f *Filter) unindexedLogs(ctx context.Context, chainView *filtermaps.ChainView, begin, end uint64) ([]*types.Log, error) {
+	trace := rpcdiag.FromContext(ctx)
+	diagnosticStarted := trace.Start()
+	defer trace.End(rpcdiag.UnindexedSearch, diagnosticStarted)
 	start := time.Now()
 	log.Debug("Performing unindexed log search", "begin", begin, "end", end)
 	var matches []*types.Log
@@ -431,7 +485,10 @@ func (f *Filter) unindexedLogs(ctx context.Context, chainView *filtermaps.ChainV
 			// the error
 			return matches, errInvalidBlockRange
 		}
+		trace.Add(rpcdiag.UnindexedBlockVisits, 1)
+		headerStarted := trace.Start()
 		header := chainView.Header(blockNumber)
+		trace.End(rpcdiag.HeaderRead, headerStarted)
 		if header == nil {
 			return matches, errors.New("header not found")
 		}
@@ -461,7 +518,10 @@ func (f *Filter) checkMatches(ctx context.Context, header *types.Header) ([]*typ
 	// such as tx index, block hash, etc.
 	// Notably tx hash is NOT filled in because it needs
 	// access to block body data.
+	trace := rpcdiag.FromContext(ctx)
+	readStarted := trace.Start()
 	cached, err := f.sys.cachedLogElem(ctx, hash, header.Number.Uint64(), header.Time)
+	trace.End(rpcdiag.BlockLogsRead, readStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +534,9 @@ func (f *Filter) checkMatches(ctx context.Context, header *types.Header) ([]*typ
 		return logs, nil
 	}
 
+	bodyStarted := trace.Start()
 	body, err := f.sys.cachedGetBody(ctx, cached, hash, header.Number.Uint64())
+	trace.End(rpcdiag.BodyRead, bodyStarted)
 	if err != nil {
 		return nil, err
 	}

@@ -288,10 +288,11 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	// Initialize filtermaps log index.
 	fmConfig := filtermaps.Config{
-		History:        config.LogHistory,
-		Disabled:       config.LogNoHistory,
-		ExportFileName: config.LogExportCheckpoints,
-		HashScheme:     scheme == rawdb.HashScheme,
+		WriteDiagnostics: stack.Config().RPCMapWriteDiagnostics,
+		History:          config.LogHistory,
+		Disabled:         config.LogNoHistory,
+		ExportFileName:   config.LogExportCheckpoints,
+		HashScheme:       scheme == rawdb.HashScheme,
 	}
 	chainView := eth.newChainView(eth.blockchain.CurrentBlock())
 	historyCutoff, _ := eth.blockchain.HistoryPruningCutoff()

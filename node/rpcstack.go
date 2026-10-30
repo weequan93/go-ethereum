@@ -54,12 +54,14 @@ type wsConfig struct {
 }
 
 type rpcEndpointConfig struct {
-	jwtSecret              []byte // optional JWT secret
-	batchItemLimit         int
-	batchResponseSizeLimit int
-	apiFilter              map[string]bool
-	httpBodyLimit          int
-	wsReadLimit            int64
+	jwtSecret                 []byte // optional JWT secret
+	batchItemLimit            int
+	batchResponseSizeLimit    int
+	apiFilter                 map[string]bool
+	httpBodyLimit             int
+	wsReadLimit               int64
+	slowCallThreshold         time.Duration
+	stageDiagnosticsThreshold time.Duration
 }
 
 type rpcHandler struct {
@@ -311,6 +313,8 @@ func (h *httpServer) enableRPC(apis []rpc.API, config httpConfig) error {
 	// Create RPC server and handler.
 	srv := rpc.NewServer()
 	srv.SetBatchLimits(config.batchItemLimit, config.batchResponseSizeLimit)
+	srv.SetSlowCallThreshold(config.slowCallThreshold)
+	srv.SetStageDiagnosticsThreshold(config.stageDiagnosticsThreshold)
 	if config.httpBodyLimit > 0 {
 		srv.SetHTTPBodyLimit(config.httpBodyLimit)
 	}
@@ -354,6 +358,8 @@ func (h *httpServer) enableWS(apis []rpc.API, config wsConfig) error {
 	// Create RPC server and handler.
 	srv := rpc.NewServer()
 	srv.SetBatchLimits(config.batchItemLimit, config.batchResponseSizeLimit)
+	srv.SetSlowCallThreshold(config.slowCallThreshold)
+	srv.SetStageDiagnosticsThreshold(config.stageDiagnosticsThreshold)
 	if config.httpBodyLimit > 0 {
 		srv.SetHTTPBodyLimit(config.httpBodyLimit)
 	}

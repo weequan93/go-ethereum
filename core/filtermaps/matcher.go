@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -264,12 +265,65 @@ func (m *matcherEnv) processEpoch(epochIndex uint32) ([]*types.Log, error) {
 // the given list of matching log indices. Matches outside the firstIndex to
 // lastIndex range are not returned.
 func (m *matcherEnv) getLogsFromMatches(matches potentialMatches) ([]*types.Log, error) {
+	// Small batches do not amortize keeping a receipt cursor. Leave their
+	// original path intact, including the common single-candidate case.
+	if len(matches) >= 8 {
+		if backend, ok := m.backend.(*FilterMapsMatcherBackend); ok {
+			if trace := rpcdiag.FromContext(m.ctx); trace != nil {
+				return m.getLogsFromMatchesObserved(backend, matches, trace)
+			}
+			return m.getLogsFromMatchesCached(backend, matches)
+		}
+	}
 	var logs []*types.Log
 	for _, match := range matches {
 		if match < m.firstIndex || match > m.lastIndex {
 			continue
 		}
 		log, err := m.backend.GetLogByLvIndex(m.ctx, match)
+		if err != nil {
+			return logs, fmt.Errorf("failed to retrieve log at index %d: %v", match, err)
+		}
+		if log != nil {
+			logs = append(logs, log)
+		}
+		matchLogLookup.Mark(1)
+	}
+	return logs, nil
+}
+
+// getLogsFromMatchesCached keeps only the current block's receipt scan for this
+// candidate batch. Single lookups and other backend implementations retain the
+// original path. Each read still validates the current chain/index snapshot.
+func (m *matcherEnv) getLogsFromMatchesCached(backend *FilterMapsMatcherBackend, matches potentialMatches) ([]*types.Log, error) {
+	var cache logLookupCache
+	var logs []*types.Log
+	for _, match := range matches {
+		if match < m.firstIndex || match > m.lastIndex {
+			continue
+		}
+		log, err := backend.getLogByLvIndexCached(match, &cache)
+		if err != nil {
+			return logs, fmt.Errorf("failed to retrieve log at index %d: %v", match, err)
+		}
+		if log != nil {
+			logs = append(logs, log)
+		}
+		matchLogLookup.Mark(1)
+	}
+	return logs, nil
+}
+
+// getLogsFromMatchesObserved mirrors the original batch walk with request-local
+// observations. Disabled queries retain the original hot loop above.
+func (m *matcherEnv) getLogsFromMatchesObserved(backend *FilterMapsMatcherBackend, matches potentialMatches, trace *rpcdiag.Trace) ([]*types.Log, error) {
+	var cache logLookupCache
+	var logs []*types.Log
+	for _, match := range matches {
+		if match < m.firstIndex || match > m.lastIndex {
+			continue
+		}
+		log, err := backend.getLogByLvIndexObserved(match, &cache, trace)
 		if err != nil {
 			return logs, fmt.Errorf("failed to retrieve log at index %d: %v", match, err)
 		}

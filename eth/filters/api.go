@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -439,6 +440,17 @@ func (api *FilterAPI) NewFilter(crit FilterCriteria) (rpc.ID, error) {
 
 // GetLogs returns logs matching the given argument that are stored within the state.
 func (api *FilterAPI) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, error) {
+	trace := rpcdiag.FromContext(ctx)
+	if trace != nil {
+		trace.Add(rpcdiag.Addresses, int64(len(crit.Addresses)))
+		trace.Add(rpcdiag.TopicPositions, int64(len(crit.Topics)))
+		for _, alternatives := range crit.Topics {
+			trace.Add(rpcdiag.TopicAlternatives, int64(len(alternatives)))
+		}
+		if crit.BlockHash != nil {
+			trace.Add(rpcdiag.ByHash, 1)
+		}
+	}
 	if len(crit.Topics) > maxTopics {
 		return nil, errExceedMaxTopics
 	}
@@ -487,6 +499,7 @@ func (api *FilterAPI) GetLogs(ctx context.Context, crit FilterCriteria) ([]*type
 	if err != nil {
 		return nil, err
 	}
+	trace.Add(rpcdiag.Results, int64(len(logs)))
 	return returnLogs(logs), err
 }
 

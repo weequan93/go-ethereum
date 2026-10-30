@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 )
@@ -72,11 +73,12 @@ type FilterMaps struct {
 	disabled   bool
 	disabledCh chan struct{} // closed by indexer if disabled
 
-	closeCh        chan struct{}
-	closeWg        sync.WaitGroup
-	history        uint64
-	hashScheme     bool // use hashdb-safe delete range method
-	exportFileName string
+	closeCh          chan struct{}
+	closeWg          sync.WaitGroup
+	history          uint64
+	hashScheme       bool // use hashdb-safe delete range method
+	exportFileName   string
+	writeDiagnostics bool // explicit per-indexer opt-in; independent of RPC tracing
 	Params
 
 	db ethdb.KeyValueStore
@@ -109,6 +111,7 @@ type FilterMaps struct {
 	matchers     map[*FilterMapsMatcherBackend]struct{}
 
 	// fields only accessed by the indexer (no mutex required).
+	baseRowAbsence                                               baseRowAbsenceCache
 	renderSnapshots                                              *lru.Cache[uint64, *renderedMap]
 	startedHeadIndex, startedTailIndex, startedTailUnindex       bool
 	startedHeadIndexAt, startedTailIndexAt, startedTailUnindexAt time.Time
@@ -213,8 +216,9 @@ type lastBlockOfMap struct {
 
 // Config contains the configuration options for NewFilterMaps.
 type Config struct {
-	History  uint64 // number of historical blocks to index
-	Disabled bool   // disables indexing completely
+	History          uint64 // number of historical blocks to index
+	Disabled         bool   // disables indexing completely
+	WriteDiagnostics bool   // enables detailed write timing/counters only when metrics are enabled
 
 	// This option enables the checkpoint JSON file generator.
 	// If set, the given file will be updated with checkpoint information.
@@ -246,6 +250,7 @@ func NewFilterMaps(db ethdb.KeyValueStore, initView *ChainView, historyCutoff, f
 		hashScheme:        config.HashScheme,
 		disabledCh:        make(chan struct{}),
 		exportFileName:    config.ExportFileName,
+		writeDiagnostics:  config.WriteDiagnostics,
 		Params:            params,
 		targetView:        initView,
 		indexedView:       initView,
@@ -349,6 +354,7 @@ func (f *FilterMaps) reset() {
 	f.renderSnapshots.Purge()
 	f.lastBlockCache.Purge()
 	f.lvPointerCache.Purge()
+	f.baseRowAbsence.invalidate()
 	f.indexLock.Unlock()
 	// deleting the range first ensures that resetDb will be called again at next
 	// startup and any leftover data will be removed even if it cannot finish now.
@@ -368,6 +374,7 @@ func (f *FilterMaps) isShuttingDown() bool {
 
 // init initializes an empty log index according to the current targetView.
 func (f *FilterMaps) init() error {
+	f.baseRowAbsence.invalidate()
 	// ensure that there is no remaining data in the filter maps key range
 	if err := f.safeDeleteWithLogs(rawdb.DeleteFilterMapsDb, "Resetting log index database", f.isShuttingDown); err != nil {
 		return err
@@ -494,6 +501,12 @@ func (f *FilterMaps) setRange(batch ethdb.KeyValueWriter, newView *ChainView, ne
 // Note that this function assumes that the indexer read lock is being held when
 // called from outside the indexerLoop goroutine.
 func (f *FilterMaps) getLogByLvIndex(lvIndex uint64) (*types.Log, error) {
+	return f.getLogByLvIndexCached(lvIndex, nil)
+}
+
+// getLogByLvIndexCached optionally reuses a single block's receipt scan within a
+// matcher. The caller must hold indexLock for reading, as with getLogByLvIndex.
+func (f *FilterMaps) getLogByLvIndexCached(lvIndex uint64, cache *logLookupCache) (*types.Log, error) {
 	mapIndex := uint32(lvIndex >> f.logValuesPerMap)
 	if !f.indexedRange.maps.Includes(mapIndex) {
 		return nil, nil
@@ -526,6 +539,9 @@ func (f *FilterMaps) getLogByLvIndex(lvIndex uint64) (*types.Log, error) {
 			firstBlockNumber = midBlockNumber
 		}
 	}
+	if cache != nil && cache.matches(f.indexedView, f.indexedRange, firstBlockNumber) {
+		return cache.cursor.find(f.valuesPerMap, lvIndex), nil
+	}
 	// get block receipts
 	receipts := f.indexedView.Receipts(firstBlockNumber)
 	if receipts == nil {
@@ -535,24 +551,118 @@ func (f *FilterMaps) getLogByLvIndex(lvIndex uint64) (*types.Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve log value pointer of block %d containing searched log value index %d: %v", firstBlockNumber, lvIndex, err)
 	}
-	// iterate through receipts to find the exact log starting at lvIndex
+	if cache != nil {
+		*cache = logLookupCache{
+			view:         f.indexedView,
+			indexedRange: f.indexedRange,
+			blockNumber:  firstBlockNumber,
+			cursor:       logLookupCursor{receipts: receipts, firstIndex: lvPointer},
+		}
+		return cache.cursor.find(f.valuesPerMap, lvIndex), nil
+	}
+	// Keep the original walk for single lookups, without allocating scan state.
 	for _, receipt := range receipts {
 		for _, log := range receipt.Logs {
-			l := uint64(len(log.Topics) + 1)
-			r := f.valuesPerMap - lvPointer%f.valuesPerMap
-			if l > r {
-				lvPointer += r // skip to map boundary
+			length := uint64(len(log.Topics) + 1)
+			remaining := f.valuesPerMap - lvPointer%f.valuesPerMap
+			if length > remaining {
+				lvPointer += remaining
 			}
 			if lvPointer > lvIndex {
-				// lvIndex does not point to the first log value (address value)
-				// generated by a log as true matches should always do, so it
-				// is considered a false positive (no log and no error returned).
 				return nil, nil
 			}
 			if lvPointer == lvIndex {
-				return log, nil // potential match
+				return log, nil
 			}
-			lvPointer += l
+			lvPointer += length
+		}
+	}
+	return nil, nil
+}
+
+func (f *FilterMaps) getLogByLvIndexObserved(lvIndex uint64, cache *logLookupCache, trace *rpcdiag.Trace) (*types.Log, error) {
+	lookupStarted := trace.Start()
+	defer trace.End(rpcdiag.LookupLocate, lookupStarted)
+	mapIndex := uint32(lvIndex >> f.logValuesPerMap)
+	if !f.indexedRange.maps.Includes(mapIndex) {
+		return nil, nil
+	}
+	// find possible block range based on map to block pointers
+	lastBlockNumber, _, err := f.getLastBlockOfMap(mapIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve last block of map %d containing searched log value index %d: %v", mapIndex, lvIndex, err)
+	}
+	var firstBlockNumber uint64
+	if mapIndex > 0 {
+		firstBlockNumber, _, err = f.getLastBlockOfMap(mapIndex - 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve last block of map %d before searched log value index %d: %v", mapIndex, lvIndex, err)
+		}
+	}
+	if firstBlockNumber < f.indexedRange.blocks.First() {
+		firstBlockNumber = f.indexedRange.blocks.First()
+	}
+	// find block with binary search based on block to log value index pointers
+	for firstBlockNumber < lastBlockNumber {
+		midBlockNumber := (firstBlockNumber + lastBlockNumber + 1) / 2
+		midLvPointer, err := f.getBlockLvPointer(midBlockNumber)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve log value pointer of block %d while binary searching log value index %d: %v", midBlockNumber, lvIndex, err)
+		}
+		if lvIndex < midLvPointer {
+			lastBlockNumber = midBlockNumber - 1
+		} else {
+			firstBlockNumber = midBlockNumber
+		}
+	}
+	if cache != nil && cache.matches(f.indexedView, f.indexedRange, firstBlockNumber) {
+		trace.Add(rpcdiag.ReceiptCursorHits, 1)
+		scanStarted := trace.Start()
+		result := cache.cursor.find(f.valuesPerMap, lvIndex)
+		trace.End(rpcdiag.ReceiptScan, scanStarted)
+		return result, nil
+	}
+	// get block receipts
+	trace.Add(rpcdiag.ReceiptReads, 1)
+	readStarted := trace.Start()
+	receipts := f.indexedView.Receipts(firstBlockNumber)
+	trace.End(rpcdiag.ReceiptsRead, readStarted)
+	if receipts == nil {
+		return nil, fmt.Errorf("failed to retrieve receipts for block %d containing searched log value index %d: %v", firstBlockNumber, lvIndex, err)
+	}
+	lvPointer, err := f.getBlockLvPointer(firstBlockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve log value pointer of block %d containing searched log value index %d: %v", firstBlockNumber, lvIndex, err)
+	}
+	if cache != nil {
+		*cache = logLookupCache{
+			view:         f.indexedView,
+			indexedRange: f.indexedRange,
+			blockNumber:  firstBlockNumber,
+			cursor:       logLookupCursor{receipts: receipts, firstIndex: lvPointer},
+		}
+		scanStarted := trace.Start()
+		result := cache.cursor.find(f.valuesPerMap, lvIndex)
+		trace.End(rpcdiag.ReceiptScan, scanStarted)
+		return result, nil
+	}
+	// Keep the original walk for single lookups, without allocating scan state.
+	scanStarted := trace.Start()
+	defer trace.End(rpcdiag.ReceiptScan, scanStarted)
+	for _, receipt := range receipts {
+		for _, log := range receipt.Logs {
+			length := uint64(len(log.Topics) + 1)
+			remaining := f.valuesPerMap - lvPointer%f.valuesPerMap
+			if length > remaining {
+				lvPointer += remaining
+			}
+			if lvPointer > lvIndex {
+				return nil, nil
+			}
+			if lvPointer == lvIndex {
+				return log, nil
+			}
+			lvPointer += length
 		}
 	}
 	return nil, nil
@@ -653,10 +763,14 @@ func (f *FilterMaps) storeFilterMapRowsOfGroup(batch ethdb.Batch, mapIndices []u
 		mapRowIndex = f.mapRowIndex(groupIndex, rowIndex)
 	)
 	if uint32(len(mapIndices)) != f.baseRowGroupSize { // skip base rows read if all rows are replaced
-		var err error
-		baseRows, err = rawdb.ReadFilterMapBaseRows(f.db, mapRowIndex, f.baseRowGroupSize, f.logMapWidth)
-		if err != nil {
-			return fmt.Errorf("failed to retrieve filter map %d base rows %d for modification: %v", groupIndex, rowIndex, err)
+		if f.baseRowAbsence.knownAbsent(groupIndex, rowIndex) {
+			baseRows = make([][]uint32, f.baseRowGroupSize)
+		} else {
+			var err error
+			baseRows, err = rawdb.ReadFilterMapBaseRows(f.db, mapRowIndex, f.baseRowGroupSize, f.logMapWidth)
+			if err != nil {
+				return fmt.Errorf("failed to retrieve filter map %d base rows %d for modification: %v", groupIndex, rowIndex, err)
+			}
 		}
 	} else {
 		baseRows = make([][]uint32, f.baseRowGroupSize)
@@ -675,6 +789,7 @@ func (f *FilterMaps) storeFilterMapRowsOfGroup(batch ethdb.Batch, mapIndices []u
 		rawdb.WriteFilterMapExtRow(batch, f.mapRowIndex(mapIndex, rowIndex), extRow, f.logMapWidth)
 	}
 	rawdb.WriteFilterMapBaseRows(batch, mapRowIndex, baseRows, f.logMapWidth)
+	f.baseRowAbsence.update(groupIndex, rowIndex, baseRows)
 	return nil
 }
 
@@ -757,6 +872,9 @@ func (f *FilterMaps) deleteLastBlockOfMap(batch ethdb.Batch, mapIndex uint32) {
 func (f *FilterMaps) deleteTailEpoch(epoch uint32) (bool, error) {
 	f.indexLock.Lock()
 	defer f.indexLock.Unlock()
+	if f.mapEpoch(f.baseRowAbsence.group) == epoch {
+		f.baseRowAbsence.invalidate()
+	}
 
 	// determine epoch boundaries
 	lastBlock, _, err := f.getLastBlockOfMap(f.lastEpochMap(epoch))

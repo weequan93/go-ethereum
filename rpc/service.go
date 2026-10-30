@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -39,7 +40,10 @@ type serviceRegistry struct {
 	mu       sync.Mutex
 	services map[string]service
 
-	apiFilter map[string]bool
+	apiFilter        map[string]bool
+	slowCallLog      atomic.Pointer[slowCallLog]
+	stageDiagnostics atomic.Pointer[stageConfig]
+	stageOutput      *stageOutput
 }
 
 // service represents a registered object.

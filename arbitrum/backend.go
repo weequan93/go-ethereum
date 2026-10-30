@@ -61,10 +61,11 @@ func NewBackend(stack *node.Node, config *Config, chainDb ethdb.Database, publis
 	}
 	// Initialize filtermaps log index.
 	fmConfig := filtermaps.Config{
-		History:        config.LogHistory,
-		Disabled:       config.LogNoHistory,
-		ExportFileName: config.LogExportCheckpoints,
-		HashScheme:     scheme == rawdb.HashScheme,
+		WriteDiagnostics: stack.Config().RPCMapWriteDiagnostics,
+		History:          config.LogHistory,
+		Disabled:         config.LogNoHistory,
+		ExportFileName:   config.LogExportCheckpoints,
+		HashScheme:       scheme == rawdb.HashScheme,
 	}
 	chainView := backend.newChainView(backend.arb.BlockChain().CurrentBlock())
 	historyCutoff, _ := backend.arb.BlockChain().HistoryPruningCutoff()

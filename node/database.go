@@ -40,8 +40,9 @@ type DatabaseOptions struct {
 	Handles          int    // number of files to be open simultaneously
 	ReadOnly         bool   // if true, no writes can be performed
 
-	PebbleExtraOptions *pebble.ExtraOptions
-	NoFreezer          bool
+	PebbleExtraOptions    *pebble.ExtraOptions
+	NoFreezer             bool
+	FreezerMaxBatchBlocks uint64 // zero uses the default chain-freezer batch size
 }
 
 type InternalOpenOptions struct {
@@ -64,10 +65,11 @@ func OpenDatabase(o InternalOpenOptions) (ethdb.Database, error) {
 		return rawdb.NewDatabase(kvdb), nil
 	}
 	opts := rawdb.OpenOptions{
-		Ancient:          o.AncientsDirectory,
-		Era:              o.EraDirectory,
-		MetricsNamespace: o.MetricsNamespace,
-		ReadOnly:         o.ReadOnly,
+		Ancient:               o.AncientsDirectory,
+		Era:                   o.EraDirectory,
+		MetricsNamespace:      o.MetricsNamespace,
+		ReadOnly:              o.ReadOnly,
+		FreezerMaxBatchBlocks: o.FreezerMaxBatchBlocks,
 	}
 	frdb, err := rawdb.Open(kvdb, opts)
 	if err != nil {

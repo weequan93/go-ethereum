@@ -260,6 +260,8 @@ type OpenOptions struct {
 	Era              string // era files directory
 	MetricsNamespace string // prefix added to freezer metric names
 	ReadOnly         bool
+	// FreezerMaxBatchBlocks bounds each chain-freezer batch. Zero uses the default.
+	FreezerMaxBatchBlocks uint64
 }
 
 // Open creates a high-level database wrapper for the given key-value store.
@@ -271,7 +273,7 @@ func Open(db ethdb.KeyValueStore, opts OpenOptions) (ethdb.Database, error) {
 	if chainFreezerDir != "" {
 		chainFreezerDir = resolveChainFreezerDir(chainFreezerDir)
 	}
-	frdb, err := newChainFreezer(chainFreezerDir, opts.Era, opts.MetricsNamespace, opts.ReadOnly)
+	frdb, err := newChainFreezer(chainFreezerDir, opts.Era, opts.MetricsNamespace, opts.ReadOnly, opts.FreezerMaxBatchBlocks)
 	if err != nil {
 		printChainMetadata(db)
 		return nil, err
@@ -361,6 +363,7 @@ func Open(db ethdb.KeyValueStore, opts OpenOptions) (ethdb.Database, error) {
 	}
 	// Freezer is consistent with the key-value database, permit combining the two
 	if !opts.ReadOnly {
+		log.Info("Chain freezer configured", "namespace", opts.MetricsNamespace, "maxBatchBlocks", frdb.maxBatchBlocks)
 		frdb.wg.Add(1)
 		go func() {
 			frdb.freeze(db)

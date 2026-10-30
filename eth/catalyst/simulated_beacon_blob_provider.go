@@ -14,7 +14,9 @@ import (
 // GetBlobs is a mimic of blobSidecars function (https://github.com/OffchainLabs/nitro/blob/a4b72abd63df46de920580685842491d550dfc20/util/headerreader/blob_client.go#L199)
 // in nitro, a mel related system test uses simulated beacon as blob reader, if that were to fail we need to update this function to be similar to the above referenced function
 func (c *SimulatedBeacon) GetBlobs(ctx context.Context, batchBlockHash common.Hash, versionedHashes []common.Hash) ([]kzg4844.Blob, error) {
+	c.blobsBundleProviderMu.RLock()
 	bundle, ok := c.blobsBundleProvider[batchBlockHash]
+	c.blobsBundleProviderMu.RUnlock()
 	if !ok {
 		return nil, errors.New("blobs not found")
 	}
@@ -65,7 +67,13 @@ func (c *SimulatedBeacon) GetBlobs(ctx context.Context, batchBlockHash common.Ha
 }
 
 func (c *SimulatedBeacon) Initialize(ctx context.Context) error {
-	c.blobsBundleProvider = make(map[common.Hash]*engine.BlobsBundle)
+	c.blobsBundleProviderMu.Lock()
+	defer c.blobsBundleProviderMu.Unlock()
+	// Several readers may share this beacon. Starting another reader must not
+	// discard bundles that have already been published by the miner.
+	if c.blobsBundleProvider == nil {
+		c.blobsBundleProvider = make(map[common.Hash]*engine.BlobsBundle)
+	}
 	return nil
 }
 

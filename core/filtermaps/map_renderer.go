@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 )
 
 const (
@@ -54,6 +55,10 @@ type mapRenderer struct {
 	finishedMaps map[uint32]*renderedMap
 	finished     common.Range[uint32]
 	iterator     *logIterator
+	// mapwrite-begin:test-hooks
+	testDisableWriteDiagnostics bool
+	testWriteObserver           func(mapWriteRecord)
+	// mapwrite-end:test-hooks
 }
 
 // renderedMap represents a single filter map that is being rendered in memory.
@@ -382,13 +387,56 @@ func (r *mapRenderer) renderCurrentMap(stopCb func() bool) (bool, error) {
 // writeFinishedMaps writes rendered maps to the database and updates
 // filterMapsRange and indexedView accordingly.
 func (r *mapRenderer) writeFinishedMaps(pauseCb func() bool) error {
-	var totalTime time.Duration
 	start := time.Now()
 	if len(r.finishedMaps) == 0 {
 		return nil
 	}
+	var observation *mapWriteObservation
+	var active time.Duration
+	completed := false
+	defer func() {
+		if observation != nil {
+			record := observation.finish(active, completed)
+			if r.testWriteObserver != nil {
+				r.testWriteObserver(record)
+			} else {
+				emitMapWriteRecord(record)
+			}
+		}
+	}()
+	enabled := r.f.writeDiagnostics && metrics.Enabled() && !r.testDisableWriteDiagnostics
+	var waiting time.Time
+	if enabled {
+		waiting = time.Now()
+	}
 	r.f.indexLock.Lock()
 	defer r.f.indexLock.Unlock()
+	cacheCommitted := false
+	defer func() {
+		if !cacheCommitted {
+			r.f.baseRowAbsence.invalidate()
+		}
+	}()
+	var acquired time.Time
+	if enabled {
+		acquired = time.Now()
+	}
+	observation = newMapWriteObservation(enabled, r.f, r.finished.First(), r.finished.AfterLast(), start)
+	if observation == nil {
+		err := r.writeFinishedMapsPlainLocked(pauseCb, start)
+		cacheCommitted = err == nil
+		return err
+	}
+	observation.times[writeLockWait] = acquired.Sub(waiting)
+	var err error
+	active, err = r.writeFinishedMapsObservedLocked(pauseCb, start, observation)
+	completed = err == nil
+	cacheCommitted = completed
+	return err
+}
+
+func (r *mapRenderer) writeFinishedMapsPlainLocked(pauseCb func() bool, start time.Time) error {
+	var totalTime time.Duration
 
 	oldRange := r.f.indexedRange
 	tempRange, err := r.getTempRange()
@@ -398,6 +446,9 @@ func (r *mapRenderer) writeFinishedMaps(pauseCb func() bool) error {
 	newRange, err := r.getUpdatedRange()
 	if err != nil {
 		return fmt.Errorf("failed to get updated rendered range: %v", err)
+	}
+	if newRange.maps.AfterLast() == r.finished.AfterLast() {
+		r.f.baseRowAbsence.prepare(r.f.mapGroupIndex(r.finished.Last()), r.f.Params)
 	}
 	renderedView := r.f.targetView // pauseCb callback might still change targetView while writing finished maps
 
@@ -512,6 +563,157 @@ func (r *mapRenderer) writeFinishedMaps(pauseCb func() bool) error {
 	totalTime += time.Since(start)
 	mapWriteTimer.Update(totalTime)
 	return nil
+}
+
+func (r *mapRenderer) writeFinishedMapsObservedLocked(pauseCb func() bool, start time.Time, observation *mapWriteObservation) (time.Duration, error) {
+	var totalTime time.Duration
+
+	oldRange := r.f.indexedRange
+	tempRange, err := r.getTempRange()
+	if err != nil {
+		return totalTime + time.Since(start), fmt.Errorf("failed to get temporary rendered range: %v", err)
+	}
+	newRange, err := r.getUpdatedRange()
+	if err != nil {
+		return totalTime + time.Since(start), fmt.Errorf("failed to get updated rendered range: %v", err)
+	}
+	if newRange.maps.AfterLast() == r.finished.AfterLast() {
+		r.f.baseRowAbsence.prepare(r.f.mapGroupIndex(r.finished.Last()), r.f.Params)
+	}
+	renderedView := r.f.targetView // pauseCb callback might still change targetView while writing finished maps
+
+	batch := r.f.db.NewBatch()
+	var writeCnt int
+	checkWriteCnt := func() {
+		writeCnt++
+		if writeCnt == rowsPerBatch {
+			writeCnt = 0
+			if err := observation.commit(batch); err != nil {
+				log.Crit("Error writing log index update batch", "error", err)
+			}
+			// do not exit while in partially written state but do allow processing
+			// events and pausing while block processing is in progress
+			r.f.indexLock.Unlock()
+			totalTime += time.Since(start)
+			// mapwrite-begin:pause-start
+			pauseStarted := observation.begin()
+			// mapwrite-end:pause-start
+			pauseCb()
+			// mapwrite-begin:pause-end
+			observation.end(writePause, pauseStarted)
+			// mapwrite-end:pause-end
+			start = time.Now()
+			r.f.indexLock.Lock()
+			// mapwrite-begin:relock
+			observation.end(writeLockWait, start)
+			// mapwrite-end:relock
+			batch = r.f.db.NewBatch()
+		}
+	}
+
+	if tempRange != r.f.indexedRange {
+		r.f.setRange(batch, r.f.indexedView, tempRange, true)
+	}
+	// add or update filter rows
+	// mapwrite-begin:row-scope-start
+	observation.beginRows()
+	// mapwrite-end:row-scope-start
+	for rowIndex := uint32(0); rowIndex < r.f.mapHeight; rowIndex++ {
+		var (
+			mapIndices []uint32
+			rows       []FilterRow
+		)
+		for mapIndex := range r.finished.Iter() {
+			row := r.finishedMaps[mapIndex].filterMap[rowIndex]
+			if fm, _ := r.f.filterMapCache.Get(mapIndex); fm != nil && row.Equal(fm[rowIndex]) {
+				continue
+			}
+			mapIndices = append(mapIndices, mapIndex)
+			rows = append(rows, row)
+		}
+		if newRange.maps.AfterLast() == r.finished.AfterLast() { // head updated; remove future entries
+			for mapIndex := r.finished.AfterLast(); mapIndex < oldRange.maps.AfterLast(); mapIndex++ {
+				if fm, _ := r.f.filterMapCache.Get(mapIndex); fm != nil && len(fm[rowIndex]) == 0 {
+					continue
+				}
+				mapIndices = append(mapIndices, mapIndex)
+				rows = append(rows, nil)
+			}
+		}
+		// mapwrite-begin:row-store
+		observation.counts[writeRowsVisited]++
+		observation.counts[writeMapRowsSelected] += uint64(len(mapIndices))
+		if err := r.f.storeFilterMapRowsObserved(batch, mapIndices, rowIndex, rows, observation); err != nil {
+			observation.endRows()
+			return totalTime + time.Since(start), fmt.Errorf("failed to store filter maps %v row %d: %v", mapIndices, rowIndex, err)
+		}
+		// mapwrite-end:row-store
+		checkWriteCnt()
+	}
+	// mapwrite-begin:row-scope-end
+	observation.endRows()
+	// mapwrite-end:row-scope-end
+	// update filter map cache
+	if newRange.maps.AfterLast() == r.finished.AfterLast() {
+		// head updated; cache new head maps and remove future entries
+		for mapIndex := range r.finished.Iter() {
+			r.f.filterMapCache.Add(mapIndex, r.finishedMaps[mapIndex].filterMap)
+		}
+		for mapIndex := r.finished.AfterLast(); mapIndex < oldRange.maps.AfterLast(); mapIndex++ {
+			r.f.filterMapCache.Remove(mapIndex)
+		}
+	} else {
+		// head not updated; do not cache maps during tail rendering because we
+		// need head maps to be available in the cache
+		for mapIndex := range r.finished.Iter() {
+			r.f.filterMapCache.Remove(mapIndex)
+		}
+	}
+	var blockNumber uint64
+	if r.finished.First() > 0 {
+		// in order to always ensure continuous block pointers, initialize
+		// blockNumber based on the last block of the previous map, then verify
+		// against the first block associated with each rendered map
+		lastBlock, _, err := r.f.getLastBlockOfMap(r.finished.First() - 1)
+		if err != nil {
+			return totalTime + time.Since(start), fmt.Errorf("failed to get last block of previous map %d: %v", r.finished.First()-1, err)
+		}
+		blockNumber = lastBlock + 1
+	}
+	// add or update block pointers
+	for mapIndex := range r.finished.Iter() {
+		renderedMap := r.finishedMaps[mapIndex]
+		if blockNumber != renderedMap.firstBlock() {
+			return totalTime + time.Since(start), fmt.Errorf("non-continuous block numbers in rendered map %d (next expected: %d  first rendered: %d)", mapIndex, blockNumber, renderedMap.firstBlock())
+		}
+		r.f.storeLastBlockOfMap(batch, mapIndex, renderedMap.lastBlock, renderedMap.lastBlockId)
+		checkWriteCnt()
+		for _, lvPtr := range renderedMap.blockLvPtrs {
+			r.f.storeBlockLvPointer(batch, blockNumber, lvPtr)
+			checkWriteCnt()
+			blockNumber++
+		}
+	}
+	if newRange.maps.AfterLast() == r.finished.AfterLast() { // head updated; remove future entries
+		for mapIndex := r.finished.AfterLast(); mapIndex < oldRange.maps.AfterLast(); mapIndex++ {
+			r.f.deleteLastBlockOfMap(batch, mapIndex)
+			checkWriteCnt()
+		}
+		for ; blockNumber < oldRange.blocks.AfterLast(); blockNumber++ {
+			r.f.deleteBlockLvPointer(batch, blockNumber)
+			checkWriteCnt()
+		}
+	}
+	r.finishedMaps = make(map[uint32]*renderedMap)
+	r.finished.SetFirst(r.finished.AfterLast())
+	r.f.setRange(batch, renderedView, newRange, false)
+	if err := observation.commit(batch); err != nil {
+		log.Crit("Error writing log index update batch", "error", err)
+	}
+	totalTime += time.Since(start)
+	mapWriteTimer.Update(totalTime)
+
+	return totalTime, nil
 }
 
 // getTempRange returns a temporary filterMapsRange that is committed to the

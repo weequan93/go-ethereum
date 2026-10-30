@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/internal/rpcdiag"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -471,13 +472,19 @@ func (h *handler) handleCallMsg(ctx *callProc, msg *jsonrpcMessage) *jsonrpcMess
 
 	case msg.isCall():
 		resp := h.handleCall(ctx, msg)
+		duration := time.Since(start)
 		var logctx []any
-		logctx = append(logctx, "reqid", idForLog{msg.ID}, "duration", time.Since(start))
+		logctx = append(logctx, "reqid", idForLog{msg.ID}, "duration", duration)
 		if resp.Error != nil {
 			logctx = append(logctx, "err", resp.Error.Message)
 			if resp.Error.Data != nil {
 				logctx = append(logctx, "errdata", formatErrorData(resp.Error.Data))
 			}
+			h.log.Warn("Served "+msg.Method, logctx...)
+		} else if h.reg.reportSlowSuccess(duration) {
+			// Keep successful slow calls visible without logging params/results.
+			logctx[1] = slowCallID(msg.ID)
+			logctx = append(logctx, "outcome", "success")
 			h.log.Warn("Served "+msg.Method, logctx...)
 		} else {
 			h.log.Debug("Served "+msg.Method, logctx...)
@@ -493,7 +500,7 @@ func (h *handler) handleCallMsg(ctx *callProc, msg *jsonrpcMessage) *jsonrpcMess
 }
 
 // handleCall processes method calls.
-func (h *handler) handleCall(cp *callProc, msg *jsonrpcMessage) *jsonrpcMessage {
+func (h *handler) handleCall(cp *callProc, msg *jsonrpcMessage) (answer *jsonrpcMessage) {
 	if msg.isSubscribe() {
 		return h.handleSubscribe(cp, msg)
 	}
@@ -511,12 +518,23 @@ func (h *handler) handleCall(cp *callProc, msg *jsonrpcMessage) *jsonrpcMessage 
 		return msg.errorResponse(&methodNotFoundError{method: msg.Method})
 	}
 
+	callCtx, trace, diagnostics := h.reg.beginStageDiagnostics(cp.ctx, msg.Method)
+	if trace != nil {
+		defer func() {
+			if answer != nil {
+				h.reg.finishStageDiagnostics(trace, diagnostics, msg.Method, answer.Error != nil)
+			}
+		}()
+	}
+	parseStarted := trace.Start()
 	args, err := parsePositionalArguments(msg.Params, callb.argTypes)
+	trace.End(rpcdiag.Params, parseStarted)
 	if err != nil {
+		trace.Max(rpcdiag.FailureKind, rpcdiag.FailureParams)
 		return msg.errorResponse(&invalidParamsError{err.Error()})
 	}
 	start := time.Now()
-	answer := h.runMethod(cp.ctx, msg, callb, args)
+	answer = h.runMethod(callCtx, msg, callb, args)
 
 	// Collect the statistics for RPC calls if metrics is enabled.
 	// We only care about pure rpc call. Filter out subscription.
@@ -574,11 +592,21 @@ func (h *handler) handleSubscribe(cp *callProc, msg *jsonrpcMessage) *jsonrpcMes
 
 // runMethod runs the Go callback for an RPC method.
 func (h *handler) runMethod(ctx context.Context, msg *jsonrpcMessage, callb *callback, args []reflect.Value) *jsonrpcMessage {
+	trace := rpcdiag.FromContext(ctx)
+	callbackStarted := trace.Start()
 	result, err := callb.call(ctx, msg.Method, args)
+	trace.End(rpcdiag.Callback, callbackStarted)
+	encodeStarted := trace.Start()
+	defer trace.End(rpcdiag.Encode, encodeStarted)
 	if err != nil {
+		trace.Error(err)
 		return msg.errorResponse(err)
 	}
-	return msg.response(result)
+	response := msg.response(result)
+	if response.Error != nil {
+		trace.Max(rpcdiag.FailureKind, rpcdiag.FailureEncode)
+	}
+	return response
 }
 
 // unsubscribe is the callback function for all *_unsubscribe calls.

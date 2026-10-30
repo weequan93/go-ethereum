@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -213,6 +214,17 @@ type Config struct {
 
 	// BatchResponseMaxSize is the maximum number of bytes returned from a batched rpc call.
 	BatchResponseMaxSize int `toml:",omitempty"`
+
+	// RPCSlowCallThreshold enables bounded timing-only logging of successful
+	// slow HTTP/WS calls. Non-positive values retain ordinary debug logging.
+	RPCSlowCallThreshold time.Duration `toml:",omitempty"`
+
+	// RPCStageDiagnosticsThreshold enables optional request-local stage diagnostics.
+	RPCStageDiagnosticsThreshold time.Duration `toml:",omitempty"`
+
+	// RPCMapWriteDiagnostics explicitly enables detailed log-index write timings
+	// and counters when metrics are enabled. Independent of request tracing.
+	RPCMapWriteDiagnostics bool `toml:",omitempty"`
 
 	// JWTSecret is the path to the hex-encoded jwt secret.
 	JWTSecret string `toml:",omitempty"`
