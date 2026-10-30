@@ -35,9 +35,9 @@ const (
 	// storage.
 	freezerRecheckInterval = time.Minute
 
-	// freezerBatchLimit is the maximum number of blocks to freeze in one batch
-	// before doing an fsync and deleting it from the key-value store.
-	freezerBatchLimit = 30000
+	// DefaultFreezerMaxBatchBlocks is the default maximum number of blocks to
+	// freeze before syncing and deleting them from the key-value store.
+	DefaultFreezerMaxBatchBlocks = 30000
 )
 
 // chainFreezer is a wrapper of chain ancient store with additional chain freezing
@@ -45,6 +45,10 @@ const (
 // key-value database to flat files for saving space on live database.
 type chainFreezer struct {
 	ancients ethdb.AncientStore // Ancient store for storing cold chain segment
+
+	// Bound the work done while ModifyAncients excludes readers. Full batches
+	// continue immediately so a smaller limit does not throttle catch-up.
+	maxBatchBlocks uint64
 
 	// Optional Era database used as a backup for the pruned chain.
 	eradb *eradb.Store
@@ -60,12 +64,19 @@ type chainFreezer struct {
 //     state freezer (e.g. dev mode).
 //   - if non-empty directory is given, initializes the regular file-based
 //     state freezer.
-func newChainFreezer(datadir string, eraDir string, namespace string, readonly bool) (*chainFreezer, error) {
+func newChainFreezer(datadir string, eraDir string, namespace string, readonly bool, maxBatchBlocks uint64) (*chainFreezer, error) {
+	if maxBatchBlocks == 0 {
+		maxBatchBlocks = DefaultFreezerMaxBatchBlocks
+	}
+	if maxBatchBlocks > DefaultFreezerMaxBatchBlocks {
+		return nil, fmt.Errorf("freezer max batch blocks %d exceeds maximum %d", maxBatchBlocks, DefaultFreezerMaxBatchBlocks)
+	}
 	if datadir == "" {
 		return &chainFreezer{
-			ancients: NewMemoryFreezer(readonly, chainFreezerTableConfigs),
-			quit:     make(chan struct{}),
-			trigger:  make(chan chan struct{}),
+			ancients:       NewMemoryFreezer(readonly, chainFreezerTableConfigs),
+			maxBatchBlocks: maxBatchBlocks,
+			quit:           make(chan struct{}),
+			trigger:        make(chan chan struct{}),
 		}, nil
 	}
 	freezer, err := NewFreezer(datadir, namespace, readonly, freezerTableSize, chainFreezerTableConfigs)
@@ -77,10 +88,11 @@ func newChainFreezer(datadir string, eraDir string, namespace string, readonly b
 		return nil, err
 	}
 	return &chainFreezer{
-		ancients: freezer,
-		eradb:    edb,
-		quit:     make(chan struct{}),
-		trigger:  make(chan chan struct{}),
+		ancients:       freezer,
+		maxBatchBlocks: maxBatchBlocks,
+		eradb:          edb,
+		quit:           make(chan struct{}),
+		trigger:        make(chan chan struct{}),
 	}, nil
 }
 
@@ -207,14 +219,21 @@ func (f *chainFreezer) freeze(db ethdb.KeyValueStore) {
 			first = frozen    // the first block to freeze
 			last  = threshold // the last block to freeze
 		)
-		if last-first+1 > freezerBatchLimit {
-			last = freezerBatchLimit + first - 1
+		if last-first+1 > f.maxBatchBlocks {
+			last = f.maxBatchBlocks + first - 1
 		}
 		ancients, err := f.freezeRange(nfdb, first, last)
 		if err != nil {
 			log.Error("Error in block freeze operation", "err", err)
 			backoff = true
 			continue
+		}
+		// This duration includes acquiring the write lock, reading the hot
+		// database and committing the ancient batch, but not the cleanup below.
+		if elapsed := time.Since(start); elapsed >= time.Second {
+			log.Warn("Slow chain freezer batch", "first", first, "last", last, "blocks", len(ancients), "elapsed", common.PrettyDuration(elapsed), "maxBatchBlocks", f.maxBatchBlocks)
+		} else if f.maxBatchBlocks != DefaultFreezerMaxBatchBlocks {
+			log.Info("Chain freezer batch appended", "first", first, "last", last, "blocks", len(ancients), "elapsed", common.PrettyDuration(elapsed), "maxBatchBlocks", f.maxBatchBlocks)
 		}
 		// Batch of blocks have been frozen, flush them before wiping from key-value store
 		if err := f.SyncAncient(); err != nil {
@@ -296,7 +315,7 @@ func (f *chainFreezer) freeze(db ethdb.KeyValueStore) {
 		log.Debug("Deep froze chain segment", context...)
 
 		// Avoid database thrashing with tiny writes
-		if frozen-first < freezerBatchLimit {
+		if frozen-first < f.maxBatchBlocks {
 			backoff = true
 		}
 	}
