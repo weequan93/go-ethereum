@@ -356,10 +356,25 @@ func New(file string, cache int, handles int, namespace string, readonly bool, e
 	opt.Experimental.ReadCompactionRate = extraOptions.Experimental.ReadCompactionRate
 	opt.Experimental.MaxWriterConcurrency = extraOptions.Experimental.MaxWriterConcurrency
 	opt.Experimental.ForceWriterParallelism = extraOptions.Experimental.ForceWriterParallelism
+	if extraOptions.WriteOriginMetrics && !readonly {
+		observation := newWriteOriginFS(vfs.Default, namespace)
+		opt.FS = observation
+		opt.EventListener.TableCreated = observation.tableCreated
+	}
 	if extraOptions.CompactionOutputBytesPerSecond > 0 && !readonly {
-		db.compactionPacing = newCompactionPacingFS(vfs.Default, extraOptions.CompactionOutputBytesPerSecond, namespace)
+		fs := opt.FS
+		if fs == nil {
+			fs = vfs.Default
+		}
+		db.compactionPacing = newCompactionPacingFS(fs, extraOptions.CompactionOutputBytesPerSecond, namespace)
 		opt.FS = db.compactionPacing
-		opt.EventListener.TableCreated = db.compactionPacing.markCompaction
+		observeTable := opt.EventListener.TableCreated
+		opt.EventListener.TableCreated = func(info pebble.TableCreateInfo) {
+			if observeTable != nil {
+				observeTable(info)
+			}
+			db.compactionPacing.markCompaction(info)
+		}
 	}
 
 	// Open the db and recover any potential corruptions

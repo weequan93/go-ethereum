@@ -34,6 +34,9 @@ const (
 // current targetView.
 func (f *FilterMaps) indexerLoop() {
 	defer f.closeWg.Done()
+	if f.writeDiagnostics {
+		defer f.tempRangeTime.set(false)
+	}
 
 	if f.disabled {
 		f.reset()

@@ -442,6 +442,9 @@ func (api *FilterAPI) NewFilter(crit FilterCriteria) (rpc.ID, error) {
 func (api *FilterAPI) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, error) {
 	trace := rpcdiag.FromContext(ctx)
 	if trace != nil {
+		if params := rpcdiag.RequestParams(ctx); params != nil {
+			trace.SetRequestParams(params)
+		}
 		trace.Add(rpcdiag.Addresses, int64(len(crit.Addresses)))
 		trace.Add(rpcdiag.TopicPositions, int64(len(crit.Topics)))
 		for _, alternatives := range crit.Topics {

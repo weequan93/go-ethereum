@@ -200,16 +200,22 @@ func (fm *FilterMapsMatcherBackend) SyncLogIndex(ctx context.Context) (SyncRange
 		// as the indexer has already been terminated.
 		return SyncRange{IndexedView: fm.f.indexedView}, nil
 	}
-	responded := trace.Start()
+	if trace != nil && fm.f.writeDiagnostics {
+		started, before := fm.f.tempRangeTime.sample()
+		defer func() {
+			finished, after := fm.f.tempRangeTime.sample()
+			trace.AddTime(rpcdiag.SyncResponseWait, finished.Sub(started))
+			trace.AddTime(rpcdiag.SyncTempRangeWait, after-before)
+		}()
+	} else {
+		defer trace.End(rpcdiag.SyncResponseWait, trace.Start())
+	}
 	select {
 	case vr := <-syncCh:
-		trace.End(rpcdiag.SyncResponseWait, responded)
 		return vr, nil
 	case <-ctx.Done():
-		trace.End(rpcdiag.SyncResponseWait, responded)
 		return SyncRange{}, ctx.Err()
 	case <-fm.f.disabledCh:
-		trace.End(rpcdiag.SyncResponseWait, responded)
 		// Note: acquiring the indexLock read lock is unnecessary here,
 		// as the indexer has already been terminated.
 		return SyncRange{IndexedView: fm.f.indexedView}, nil

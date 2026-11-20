@@ -159,6 +159,36 @@ func TestSyncLogIndexWaitDiagnosticsDeadlineBeforeEnqueue(t *testing.T) {
 	}
 }
 
+func TestSyncLogIndexObservesTemporaryRangeOnCancel(t *testing.T) {
+	f, fm := syncWaitFixture()
+	f.writeDiagnostics = true
+	f.tempRangeTime.set(true)
+	defer f.tempRangeTime.set(false)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, trace := rpcdiag.New(parent)
+	result := make(chan syncWaitResult, 1)
+	go func() {
+		value, err := fm.SyncLogIndex(ctx)
+		result <- syncWaitResult{value, err}
+	}()
+	select {
+	case <-f.matcherSyncCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sync request did not enqueue")
+	}
+	syncWaitUntil(t, func() bool { return trace.Snapshot().Stages[rpcdiag.SyncEnqueueWait].Calls == 1 })
+	cancel()
+	if got := syncWaitReceive(t, result); got.err != context.Canceled {
+		t.Fatalf("got %v", got.err)
+	}
+	s := trace.Snapshot()
+	temporary, response := s.Stages[rpcdiag.SyncTempRangeWait], s.Stages[rpcdiag.SyncResponseWait]
+	if temporary.Calls != 1 || temporary.Nanoseconds <= 0 || response.Calls != 1 || temporary.Nanoseconds > response.Nanoseconds {
+		t.Fatalf("temporary=%+v response=%+v", temporary, response)
+	}
+}
+
 func TestSyncLogIndexWaitDiagnosticsConcurrentBackendsKeepRequestIsolation(t *testing.T) {
 	f, _ := syncWaitFixture()
 	const count = 8

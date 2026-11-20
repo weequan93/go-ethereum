@@ -2,12 +2,16 @@ package rpcdiag
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	publicrpcdiag "github.com/ethereum/go-ethereum/rpcdiag"
 )
 
 func TestTraceContextPreservesCancellationDeadlineAndValues(t *testing.T) {
@@ -81,6 +85,47 @@ func TestTraceNilAndNegativeSamplesAreNoOps(t *testing.T) {
 	}
 }
 
+func TestNamedTransactionStagesBridgeThroughPublicContext(t *testing.T) {
+	ctx, trace := New(context.Background())
+	finish := publicrpcdiag.StartNamed(ctx, "tx_publish_queue_wait")
+	finish()
+	if got := trace.Snapshot().Stages[TxPublishQueueWait].Calls; got != 1 {
+		t.Fatalf("queue wait calls=%d", got)
+	}
+	if got := trace.Snapshot().Stages[TxPublishQueueWait].Nanoseconds; got < 0 {
+		t.Fatalf("queue wait duration=%d", got)
+	}
+	publicrpcdiag.StartNamed(context.Background(), "tx_publish_queue_wait")()
+	if got := trace.Snapshot().Stages[TxPublishQueueWait].Calls; got != 1 {
+		t.Fatalf("unrelated context changed trace calls=%d", got)
+	}
+}
+
+func TestTransactionQueueObservationPreservesSequenceIDInSlowLog(t *testing.T) {
+	ctx, trace := New(context.Background())
+	recorder := publicrpcdiag.FromContext(ctx).(publicrpcdiag.TxQueueRecorder)
+	recorder.RecordTxQueue(publicrpcdiag.TxQueueObservation{
+		Dequeued: true, FirstDequeue: 20 * time.Millisecond,
+		NonceWait: 10 * time.Millisecond, SequenceWait: 500 * time.Millisecond, LastSeqID: 71,
+	})
+	snapshot := trace.Snapshot()
+	for stage, want := range map[Stage]time.Duration{
+		TxPublishFirstDequeue: 20 * time.Millisecond, TxPublishNonceWait: 10 * time.Millisecond,
+		TxPublishSequenceWait: 500 * time.Millisecond,
+	} {
+		if got := snapshot.Stages[stage]; got.Nanoseconds != int64(want) || got.Calls != 1 {
+			t.Fatalf("stage %d got %+v", stage, got)
+		}
+	}
+	logFields := snapshot.LogFields()
+	for i := 0; i+1 < len(logFields); i += 2 {
+		if logFields[i] == "tx_publish_last_seq_id" && logFields[i+1] == uint64(71) {
+			return
+		}
+	}
+	t.Fatal("slow log missing sequencing operation ID")
+}
+
 func TestTraceErrorClassesAndBoundedFields(t *testing.T) {
 	for _, entry := range []struct {
 		err  error
@@ -126,6 +171,21 @@ func TestTraceReadLockKeepsMutualExclusion(t *testing.T) {
 	s := trace.Snapshot()
 	if s.Stages[IndexLockWait].Calls != 1 || s.Stages[IndexLockHold].Calls != 1 {
 		t.Fatal("lock timing missing")
+	}
+}
+
+func TestRequestParamsAreRenderedInSlowDetailFields(t *testing.T) {
+	_, trace := New(context.Background())
+	trace.SetRequestParams([]byte(`[{"fromBlock":"0x10","toBlock":"latest","address":"0x01","topics":[null,"0x02"]}]`))
+	encoded, err := json.Marshal(trace.Snapshot().LogFields())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, want := range []string{"request_params_json", "fromBlock", "toBlock", "latest", "request_params_sha256", "request_params_truncated"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("request params missing %q: %s", want, text)
+		}
 	}
 }
 

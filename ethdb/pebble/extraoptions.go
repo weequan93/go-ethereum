@@ -12,6 +12,7 @@ type ExtraOptions struct {
 	MemTableStopWritesThreshold    int
 	MaxConcurrentCompactions       func() int
 	CompactionOutputBytesPerSecond int64
+	WriteOriginMetrics             bool
 	DisableAutomaticCompactions    bool
 	WALBytesPerSync                int
 	WALDir                         string

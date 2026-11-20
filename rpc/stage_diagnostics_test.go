@@ -138,7 +138,10 @@ func TestStageDiagnosticsHTTPBatchAndNotifications(t *testing.T) {
 }
 
 func TestStageDiagnosticsThresholdCountsAreIndependentOfDetailDrops(t *testing.T) {
-	c := stageCounters{metrics.NewCounter(), metrics.NewCounter(), metrics.NewCounter(), metrics.NewCounter()}
+	c := stageCounters{total: metrics.NewCounter(), ge1s: metrics.NewCounter(), ge3s: metrics.NewCounter(), ge5s: metrics.NewCounter()}
+	for i := range c.subsecond {
+		c.subsecond[i] = metrics.NewCounter()
+	}
 	for _, d := range []time.Duration{0, time.Second - 1, time.Second, 3*time.Second - 1, 3 * time.Second, 5*time.Second - 1, 5 * time.Second} {
 		c.complete(d)
 	}
@@ -155,6 +158,45 @@ func TestStageDiagnosticsThresholdCountsAreIndependentOfDetailDrops(t *testing.T
 	}
 	if len(output.records) != stageQueueSize || config.dropped.Snapshot().Count()-drops != 100-stageQueueSize || config.counts[0][0].total.Snapshot().Count()-before != 100 {
 		t.Fatal("bounded sink changed denominator or blocked producer")
+	}
+	// Account for subsecond calls even if every detail is below the logging
+	// threshold or the detail limiter is exhausted.
+	config.threshold = time.Hour
+	config.limiter = rate.NewLimiter(0, 0)
+	count := config.counts[0][0].subsecond[0]
+	before, drops = count.Snapshot().Count(), config.dropped.Snapshot().Count()
+	_, trace := rpcdiag.New(context.Background())
+	time.Sleep(11 * time.Millisecond)
+	s.services.finishStageDiagnostics(trace, config, "eth_getLogs", false)
+	if count.Snapshot().Count()-before != 1 || config.dropped.Snapshot().Count() != drops {
+		t.Fatal("subsecond completion depended on detail threshold/limiter")
+	}
+}
+
+func TestStageDiagnosticsSubsecondThresholdBoundaries(t *testing.T) {
+	for _, threshold := range stageSubsecondThresholds {
+		for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+			t.Run(threshold.name+"/"+offset.String(), func(t *testing.T) {
+				c := stageCounters{total: metrics.NewCounter(), ge1s: metrics.NewCounter(), ge3s: metrics.NewCounter(), ge5s: metrics.NewCounter()}
+				for i := range c.subsecond {
+					c.subsecond[i] = metrics.NewCounter()
+				}
+				duration := threshold.duration + offset
+				c.complete(duration)
+				if c.total.Snapshot().Count() != 1 || c.ge1s.Snapshot().Count() != 0 {
+					t.Fatal("subsecond call changed total or >=1s accounting")
+				}
+				for i, candidate := range stageSubsecondThresholds {
+					var want int64
+					if duration >= candidate.duration {
+						want = 1
+					}
+					if got := c.subsecond[i].Snapshot().Count(); got != want {
+						t.Fatalf("%s at %s: got %d want %d", candidate.name, duration, got, want)
+					}
+				}
+			})
+		}
 	}
 }
 

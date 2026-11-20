@@ -520,6 +520,9 @@ func (h *handler) handleCall(cp *callProc, msg *jsonrpcMessage) (answer *jsonrpc
 
 	callCtx, trace, diagnostics := h.reg.beginStageDiagnostics(cp.ctx, msg.Method)
 	if trace != nil {
+		if msg.Method == "eth_getLogs" {
+			callCtx = rpcdiag.WithRequestParams(callCtx, msg.Params)
+		}
 		defer func() {
 			if answer != nil {
 				h.reg.finishStageDiagnostics(trace, diagnostics, msg.Method, answer.Error != nil)

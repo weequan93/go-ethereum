@@ -15,7 +15,22 @@ import (
 
 const stageQueueSize = 32
 
-type stageCounters struct{ total, ge1s, ge3s, ge5s *metrics.Counter }
+var stageSubsecondThresholds = [...]struct {
+	name     string
+	duration time.Duration
+}{
+	{"ge10ms", 10 * time.Millisecond},
+	{"ge25ms", 25 * time.Millisecond},
+	{"ge50ms", 50 * time.Millisecond},
+	{"ge100ms", 100 * time.Millisecond},
+	{"ge250ms", 250 * time.Millisecond},
+	{"ge500ms", 500 * time.Millisecond},
+}
+
+type stageCounters struct {
+	total, ge1s, ge3s, ge5s *metrics.Counter
+	subsecond               [len(stageSubsecondThresholds)]*metrics.Counter
+}
 type stageConfig struct {
 	threshold time.Duration
 	limiter   *rate.Limiter
@@ -34,7 +49,8 @@ type stageOutput struct {
 
 // SetStageDiagnosticsThreshold enables request-local diagnostics only for
 // eth_getLogs and eth_sendRawTransaction. A non-positive value disables new
-// traces. All completed instrumented calls are counted, including >=1/3/5s.
+// traces. All completed instrumented calls are counted, including subsecond
+// thresholds at 10/25/50/100/250/500ms and the existing >=1/3/5s thresholds.
 // Detail logging uses a bounded, non-blocking queue and a shared1/s burst10
 // limiter per server. This startup option does not change RPC execution.
 func (s *Server) SetStageDiagnosticsThreshold(threshold time.Duration) {
@@ -57,10 +73,16 @@ func (s *Server) SetStageDiagnosticsThreshold(threshold time.Duration) {
 	for mi, method := range []string{"eth_getLogs", "eth_sendRawTransaction"} {
 		for oi, outcome := range []string{"success", "failure"} {
 			prefix := "rpc/diagnostics/" + method + "/" + outcome + "/"
-			config.counts[mi][oi] = stageCounters{
-				metrics.GetOrRegisterCounter(prefix+"completed", nil), metrics.GetOrRegisterCounter(prefix+"ge1s", nil),
-				metrics.GetOrRegisterCounter(prefix+"ge3s", nil), metrics.GetOrRegisterCounter(prefix+"ge5s", nil),
+			counts := stageCounters{
+				total: metrics.GetOrRegisterCounter(prefix+"completed", nil),
+				ge1s:  metrics.GetOrRegisterCounter(prefix+"ge1s", nil),
+				ge3s:  metrics.GetOrRegisterCounter(prefix+"ge3s", nil),
+				ge5s:  metrics.GetOrRegisterCounter(prefix+"ge5s", nil),
 			}
+			for i, threshold := range stageSubsecondThresholds {
+				counts.subsecond[i] = metrics.GetOrRegisterCounter(prefix+threshold.name, nil)
+			}
+			config.counts[mi][oi] = counts
 		}
 	}
 	s.services.stageDiagnostics.Store(config)
@@ -139,6 +161,11 @@ func (r *serviceRegistry) finishStageDiagnostics(trace *rpcdiag.Trace, config *s
 
 func (c stageCounters) complete(duration time.Duration) {
 	c.total.Inc(1)
+	for i, threshold := range stageSubsecondThresholds {
+		if duration >= threshold.duration {
+			c.subsecond[i].Inc(1)
+		}
+	}
 	if duration >= time.Second {
 		c.ge1s.Inc(1)
 	}

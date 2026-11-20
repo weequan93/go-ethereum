@@ -4,10 +4,12 @@
 package exp
 
 import (
+	"encoding/json"
 	"expvar"
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
@@ -46,6 +48,7 @@ func Exp(r metrics.Registry) {
 	// haven't found an elegant way, so just use a different endpoint
 	http.Handle("/debug/metrics", h)
 	http.Handle("/debug/metrics/prometheus", prometheus.Handler(r))
+	http.Handle("/debug/metrics/pebble-write-origin", writeOriginHandler(r))
 }
 
 // ExpHandler will return an expvar powered metrics handler.
@@ -60,12 +63,39 @@ func Setup(address string) {
 	m := http.NewServeMux()
 	m.Handle("/debug/metrics", ExpHandler(metrics.DefaultRegistry))
 	m.Handle("/debug/metrics/prometheus", prometheus.Handler(metrics.DefaultRegistry))
+	m.Handle("/debug/metrics/pebble-write-origin", writeOriginHandler(metrics.DefaultRegistry))
 	log.Info("Starting metrics server", "addr", fmt.Sprintf("http://%s/debug/metrics", address))
 	go func() {
 		if err := http.ListenAndServe(address, m); err != nil {
 			log.Error("Failure in running metrics server", "err", err)
 		}
 	}()
+}
+
+func writeOriginHandler(registry metrics.Registry) http.Handler {
+	generation := time.Now().UTC().Format(time.RFC3339Nano)
+	origins := [...]string{"compaction", "flush", "wal", "manifest", "other"}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		values := make(map[string]int64, len(origins))
+		for _, origin := range origins {
+			counter, ok := registry.Get("l2chaindata/write/origin/" + origin + "/bytes").(*metrics.Counter)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			values[origin] = counter.Snapshot().Count()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Generation string           `json:"generation"`
+			Bytes      map[string]int64 `json:"bytes"`
+		}{generation, values})
+	})
 }
 
 func (exp *exp) getInt(name string) *expvar.Int {

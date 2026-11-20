@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	publicrpcdiag "github.com/ethereum/go-ethereum/rpcdiag"
 )
 
 type Stage uint8
@@ -40,10 +42,31 @@ const (
 	SyncRegisterWait
 	SyncEnqueueWait
 	SyncResponseWait
+	TxPublishStateAt
+	TxPublishPrecheck
+	TxPublishFilter
+	TxPublishPublisher
+	TxPublishForwarder
+	TxPublishForwarderTarget
+	TxPublishQueueEnqueue
+	TxPublishQueueWait
+	SyncTempRangeWait
+	TxPublishFirstDequeue
+	TxPublishNonceWait
+	TxPublishSequenceWait
 	stageCount
 )
 
-var stageNames = [stageCount]string{"params", "callback", "encode", "resolve", "backend_setup", "sync_initial", "indexed_search", "result_filter", "unindexed_search", "sync_post", "consistency", "backend_close", "index_lock_wait", "index_lock_hold", "filter_rows_read", "block_pointer_access", "log_lookup", "receipts_access", "receipt_scan", "header_access", "block_logs_access", "body_access", "sync_register_wait", "sync_enqueue_wait", "sync_response_wait"}
+var stageNames = [stageCount]string{
+	"params", "callback", "encode", "resolve", "backend_setup", "sync_initial", "indexed_search",
+	"result_filter", "unindexed_search", "sync_post", "consistency", "backend_close", "index_lock_wait",
+	"index_lock_hold", "filter_rows_read", "block_pointer_access", "log_lookup", "receipts_access",
+	"receipt_scan", "header_access", "block_logs_access", "body_access", "sync_register_wait",
+	"sync_enqueue_wait", "sync_response_wait", "tx_publish_state_at", "tx_publish_precheck",
+	"tx_publish_filter", "tx_publish_publisher", "tx_publish_forwarder", "tx_publish_forwarder_target",
+	"tx_publish_queue_enqueue", "tx_publish_queue_wait", "sync_temp_range_wait",
+	"tx_publish_first_dequeue", "tx_publish_nonce_wait", "tx_publish_sequence_wait",
+}
 
 type Field uint8
 
@@ -85,24 +108,34 @@ var sequence atomic.Uint64
 type contextKey struct{}
 type span struct{ ns, calls, maximum atomic.Int64 }
 type Trace struct {
-	started time.Time
-	id      uint64
-	spans   [stageCount]span
-	fields  [fieldCount]atomic.Int64
+	started   time.Time
+	id        uint64
+	spans     [stageCount]span
+	fields    [fieldCount]atomic.Int64
+	lastSeqID atomic.Uint64
+	// requestParams is set once by eth_getLogs after argument parsing. The
+	// request owns the referenced bytes and does not mutate them while the trace
+	// is live. It is rendered only when a slow detail record is emitted.
+	requestParams    []byte
+	hasRequestParams bool
 }
 
 type Timing struct{ Nanoseconds, Calls, MaxNanoseconds int64 }
 type Snapshot struct {
-	ID     uint64
-	Total  time.Duration
-	Stages [stageCount]Timing
-	Fields [fieldCount]int64
+	ID               uint64
+	Total            time.Duration
+	Stages           [stageCount]Timing
+	Fields           [fieldCount]int64
+	RequestParams    []byte
+	HasRequestParams bool
+	LastSeqID        uint64
 }
 
 func New(ctx context.Context) (context.Context, *Trace) {
 	everEnabled.Store(true)
 	t := &Trace{started: time.Now(), id: sequence.Add(1)}
-	return context.WithValue(ctx, contextKey{}, t), t
+	observed := context.WithValue(ctx, contextKey{}, t)
+	return publicrpcdiag.WithRecorder(observed, t), t
 }
 func FromContext(ctx context.Context) *Trace {
 	if !everEnabled.Load() {
@@ -167,7 +200,8 @@ func (t *Trace) Error(err error) {
 	t.Max(FailureKind, kind)
 }
 func (t *Trace) Snapshot() Snapshot {
-	result := Snapshot{ID: t.id, Total: time.Since(t.started)}
+	result := Snapshot{ID: t.id, Total: time.Since(t.started), RequestParams: t.requestParams,
+		HasRequestParams: t.hasRequestParams, LastSeqID: t.lastSeqID.Load()}
 	for i := range result.Stages {
 		s := &t.spans[i]
 		result.Stages[i] = Timing{s.ns.Load(), s.calls.Load(), s.maximum.Load()}
@@ -179,6 +213,40 @@ func (t *Trace) Snapshot() Snapshot {
 }
 
 func (t *Trace) Elapsed() time.Duration { return time.Since(t.started) }
+
+// Begin and EndNamed implement the public recorder bridge used by the Nitro
+// transaction publisher. They reuse the same request-local atomic stage data.
+func (t *Trace) Begin(_ string) time.Time { return t.Start() }
+
+func (t *Trace) EndNamed(name string, started time.Time) {
+	if stage, ok := namedStage[name]; ok {
+		t.End(stage, started)
+	}
+}
+
+func (t *Trace) RecordTxQueue(o publicrpcdiag.TxQueueObservation) {
+	if o.Dequeued {
+		t.AddTime(TxPublishFirstDequeue, o.FirstDequeue)
+	}
+	if o.NonceWait > 0 {
+		t.AddTime(TxPublishNonceWait, o.NonceWait)
+	}
+	if o.SequenceWait > 0 {
+		t.AddTime(TxPublishSequenceWait, o.SequenceWait)
+	}
+	t.lastSeqID.Store(o.LastSeqID)
+}
+
+var namedStage = map[string]Stage{
+	"tx_publish_state_at":         TxPublishStateAt,
+	"tx_publish_precheck":         TxPublishPrecheck,
+	"tx_publish_filter":           TxPublishFilter,
+	"tx_publish_publisher":        TxPublishPublisher,
+	"tx_publish_forwarder":        TxPublishForwarder,
+	"tx_publish_forwarder_target": TxPublishForwarderTarget,
+	"tx_publish_queue_enqueue":    TxPublishQueueEnqueue,
+	"tx_publish_queue_wait":       TxPublishQueueWait,
+}
 
 // RLock/RUnlock preserve the original lock operation/order. Only numeric timing
 // is updated, after releasing the lock for hold time. No observer lock is held.
@@ -223,5 +291,8 @@ func (s Snapshot) LogFields() []any {
 	for i, value := range s.Fields {
 		fields = append(fields, fieldNames[i], value)
 	}
-	return fields
+	if s.LastSeqID != 0 {
+		fields = append(fields, "tx_publish_last_seq_id", s.LastSeqID)
+	}
+	return s.appendRequestParams(fields)
 }

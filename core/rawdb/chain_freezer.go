@@ -398,8 +398,11 @@ func (f *chainFreezer) Ancient(kind string, number uint64) ([]byte, error) {
 // i.e. if fn performs multiple reads, they will be consistent with each other.
 func (f *chainFreezer) ReadAncients(fn func(ethdb.AncientReaderOp) error) (err error) {
 	if store, ok := f.ancients.(*Freezer); ok {
-		store.writeLock.Lock()
-		defer store.writeLock.Unlock()
+		// Match Freezer.ReadAncients: readers may overlap, but the whole
+		// callback must exclude appends and truncations, including while
+		// falling back from ancient data to the hot database.
+		store.writeLock.RLock()
+		defer store.writeLock.RUnlock()
 	}
 	return fn(f)
 }

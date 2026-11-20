@@ -86,10 +86,11 @@ type FilterMaps struct {
 	// fields written by the indexer and read by matcher backend. Indexer can
 	// read them without a lock and write them under indexLock write lock.
 	// Matcher backend can read them under indexLock read lock.
-	indexLock    sync.RWMutex
-	indexedRange filterMapsRange
-	indexedView  *ChainView // always consistent with the log index
-	hasTempRange bool
+	indexLock     sync.RWMutex
+	indexedRange  filterMapsRange
+	indexedView   *ChainView // always consistent with the log index
+	hasTempRange  bool
+	tempRangeTime tempRangeTimer
 
 	// cleanedEpochsBefore indicates that all unindexed data before this point
 	// has been cleaned.
@@ -466,6 +467,9 @@ func (f *FilterMaps) safeDeleteWithLogs(deleteFn func(db ethdb.KeyValueStore, ha
 //
 // Note that this function assumes that the index write lock is being held.
 func (f *FilterMaps) setRange(batch ethdb.KeyValueWriter, newView *ChainView, newRange filterMapsRange, isTempRange bool) {
+	if isTempRange && f.writeDiagnostics {
+		f.tempRangeTime.set(true)
+	}
 	f.indexedView = newView
 	f.indexedRange = newRange
 	f.hasTempRange = isTempRange

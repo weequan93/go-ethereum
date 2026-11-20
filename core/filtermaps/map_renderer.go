@@ -560,6 +560,9 @@ func (r *mapRenderer) writeFinishedMapsPlainLocked(pauseCb func() bool, start ti
 	if err := batch.Write(); err != nil {
 		log.Crit("Error writing log index update batch", "error", err)
 	}
+	if r.f.writeDiagnostics {
+		r.f.tempRangeTime.set(false)
+	}
 	totalTime += time.Since(start)
 	mapWriteTimer.Update(totalTime)
 	return nil
@@ -710,6 +713,7 @@ func (r *mapRenderer) writeFinishedMapsObservedLocked(pauseCb func() bool, start
 	if err := observation.commit(batch); err != nil {
 		log.Crit("Error writing log index update batch", "error", err)
 	}
+	r.f.tempRangeTime.set(false) // A write observation requires write diagnostics.
 	totalTime += time.Since(start)
 	mapWriteTimer.Update(totalTime)
 
