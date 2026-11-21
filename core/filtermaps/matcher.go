@@ -82,9 +82,10 @@ func GetPotentialMatches(ctx context.Context, backend MatcherBackend, firstBlock
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve log value pointer after last block %d: %v", lastBlock, err)
 	}
-	if lastIndex > 0 {
-		lastIndex--
+	if lastIndex == 0 || firstIndex > lastIndex-1 {
+		return nil, nil
 	}
+	lastIndex--
 
 	// build matcher according to the given filter criteria
 	matchers := make([]matcher, len(topics)+1)
